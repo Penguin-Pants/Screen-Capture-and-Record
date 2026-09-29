@@ -11,27 +11,25 @@ let isDrawing = false;
 let startX, startY;
 let currentColor = '#ff0000';
 let currentSize = 5;
+// Undo history: snapshots of { base canvas, floating layers }.
+// Canvas copies are fast to make and restore, unlike PNG data URLs.
+const HISTORY_MAX_STATES = 50;
+const HISTORY_MAX_BYTES = 512 * 1024 * 1024;
 let history = [];
 let historyStep = -1;
-let currentImage = null;
+let originalState = null;
+let documentName = `edited-${fileTimestamp()}`;
 let tempCanvas = null;
+// Image layers float over layerBase until another tool merges them.
 let layers = [];
+let layerBase = null;
 let selectedLayer = null;
 let isDraggingLayer = false;
 let dragStartX = 0;
 let dragStartY = 0;
-
-// All tools are now unlocked - remove premium checks
-function updatePremiumButtons() {
-  // Remove all premium locks
-  document.querySelectorAll('.tool-btn.premium').forEach(btn => {
-    btn.classList.remove('premium', 'locked');
-    btn.title = '';
-  });
-}
-
-// Initialize - unlock all tools
-updatePremiumButtons();
+let highlightPoints = [];
+let pendingTextPosition = null;
+let zoomLevel = null; // null means "fit to window"
 
 // Tool selection
 document.querySelectorAll('[data-tool]').forEach(btn => {
@@ -100,15 +98,22 @@ function createNewCanvas() {
   ctx.fillStyle = 'white';
   ctx.fillRect(0, 0, w, h);
   
+  startDocument(`image-${fileTimestamp()}`);
+  showStatus(`New ${w}×${h}px canvas created`);
+}
+
+// Reset history and layers for a new image that is already on the canvas.
+function startDocument(name) {
   uploadArea.style.display = 'none';
   canvas.style.display = 'block';
-  
-  currentImage = null;
+  documentName = name;
+  layers = [];
+  layerBase = null;
   history = [];
   historyStep = -1;
-  layers = [];
+  zoomLevel = null;
+  originalState = snapshot();
   saveState();
-  showStatus(`New ${w}×${h}px canvas created`);
 }
 
 // File upload
@@ -178,32 +183,54 @@ document.addEventListener('paste', (e) => {
 });
 
 function loadImage(file) {
+  const baseName = (file.name || '').replace(/\.[^.]+$/, '');
   const reader = new FileReader();
   reader.onload = (e) => {
-    const img = new Image();
-    img.onload = () => {
-      currentImage = img;
-      canvas.width = img.width;
-      canvas.height = img.height;
-      ctx.fillStyle = 'white';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      ctx.drawImage(img, 0, 0);
-      
-      uploadArea.style.display = 'none';
-      canvas.style.display = 'block';
-      
-      history = [];
-      historyStep = -1;
-      layers = [];
-      saveState();
-      showStatus('Image loaded successfully!');
-    };
-    img.src = e.target.result;
+    loadImageUrl(e.target.result, baseName ? `${baseName}-edited` : `image-${fileTimestamp()}`)
+      .then(() => showStatus('Image loaded'));
   };
   reader.readAsDataURL(file);
 }
 
+function loadImageUrl(url, name) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      canvas.width = img.width;
+      canvas.height = img.height;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0);
+      startDocument(name);
+      resolve();
+    };
+    img.onerror = () => reject(new Error('The image could not be loaded.'));
+    img.src = url;
+  });
+}
+
+// Open a capture that the background page sent: editor.html?capture=<id>
+async function loadCaptureFromUrl() {
+  const id = new URLSearchParams(location.search).get('capture');
+  if (!id) return;
+  try {
+    const capture = await browser.runtime.sendMessage({ action: 'getCapture', id });
+    if (!capture) {
+      showStatus('This capture is no longer available.');
+      return;
+    }
+    await loadImageUrl(capture.dataUrl, capture.name);
+    showStatus('Capture ready. Save (Ctrl+S) or copy (Ctrl+C) when done.');
+  } catch (error) {
+    console.error('Could not load capture:', error);
+    showStatus('Could not load the capture.');
+  }
+}
+
 function addImageLayer(file) {
+  if (!hasImage()) {
+    loadImage(file);
+    return;
+  }
   const reader = new FileReader();
   reader.onload = (e) => {
     const img = new Image();
@@ -211,6 +238,8 @@ function addImageLayer(file) {
       const x = (canvas.width - img.width) / 2;
       const y = (canvas.height - img.height) / 2;
       
+      // The first layer keeps a copy of the pixels under all layers.
+      if (layers.length === 0) layerBase = copyCanvas(canvas);
       layers.push({
         image: img,
         x: x,
@@ -228,28 +257,42 @@ function addImageLayer(file) {
   reader.readAsDataURL(file);
 }
 
+// Draw the pixels under the layers, then the layers. The base holds all
+// drawings and filters, so moving a layer does not erase them.
 function redrawCanvas() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  if (currentImage) {
-    ctx.drawImage(currentImage, 0, 0);
-  } else {
-    ctx.fillStyle = 'white';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-  }
+  if (layerBase) ctx.drawImage(layerBase, 0, 0);
   
   layers.forEach(layer => {
     ctx.drawImage(layer.image, layer.x, layer.y, layer.width, layer.height);
   });
 }
 
+// Merge the floating layers into the image. The canvas already shows
+// them, so only the layer state changes. Call before any edit that is not
+// a layer move.
+function flattenLayers() {
+  layers = [];
+  layerBase = null;
+  selectedLayer = null;
+}
+
+function copyCanvas(source) {
+  const copy = document.createElement('canvas');
+  copy.width = source.width;
+  copy.height = source.height;
+  copy.getContext('2d').drawImage(source, 0, 0);
+  return copy;
+}
+
 function getCanvasCoordinates(e) {
   const rect = canvas.getBoundingClientRect();
-  const scaleX = canvas.width / rect.width;
-  const scaleY = canvas.height / rect.height;
+  const scaleX = canvas.width / canvas.clientWidth;
+  const scaleY = canvas.height / canvas.clientHeight;
   
   return {
-    x: (e.clientX - rect.left) * scaleX,
-    y: (e.clientY - rect.top) * scaleY
+    x: (e.clientX - rect.left - canvas.clientLeft) * scaleX,
+    y: (e.clientY - rect.top - canvas.clientTop) * scaleY
   };
 }
 
@@ -294,6 +337,7 @@ canvas.addEventListener('mousedown', (e) => {
     return;
   }
 
+  flattenLayers();
   isDrawing = true;
 
   if (currentTool === 'text') {
@@ -303,13 +347,10 @@ canvas.addEventListener('mousedown', (e) => {
     ctx.beginPath();
     ctx.moveTo(startX, startY);
   } else if (currentTool === 'highlight') {
-    ctx.globalAlpha = 0.3;
-    ctx.strokeStyle = currentColor;
-    ctx.lineWidth = currentSize * 3;
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    ctx.beginPath();
-    ctx.moveTo(startX, startY);
+    // Redraw the full stroke over a snapshot on each move, so the
+    // transparency does not build up where the path overlaps itself.
+    tempCanvas = copyCanvas(canvas);
+    highlightPoints = [{ x: startX, y: startY }];
   } else if (currentTool === 'eraser') {
     if (!tempCanvas) {
       tempCanvas = document.createElement('canvas');
@@ -361,12 +402,8 @@ canvas.addEventListener('mousemove', (e) => {
     ctx.lineTo(currentX, currentY);
     ctx.stroke();
   } else if (currentTool === 'highlight') {
-    ctx.strokeStyle = currentColor;
-    ctx.lineWidth = currentSize * 3;
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    ctx.lineTo(currentX, currentY);
-    ctx.stroke();
+    highlightPoints.push({ x: currentX, y: currentY });
+    drawHighlight();
   } else if (currentTool === 'eraser') {
     ctx.lineTo(currentX, currentY);
     ctx.stroke();
@@ -495,9 +532,9 @@ canvas.addEventListener('mouseup', (e) => {
     ctx.stroke();
     saveState();
   } else if (currentTool === 'highlight') {
-    ctx.lineTo(endX, endY);
-    ctx.stroke();
-    ctx.globalAlpha = 1.0;
+    highlightPoints.push({ x: endX, y: endY });
+    drawHighlight();
+    highlightPoints = [];
     saveState();
   } else if (currentTool === 'eraser') {
     ctx.lineTo(endX, endY);
@@ -557,10 +594,14 @@ canvas.addEventListener('mouseleave', () => {
     if (currentTool === 'eraser') {
       ctx.globalCompositeOperation = 'source-over';
     } else if (currentTool === 'highlight') {
-      ctx.globalAlpha = 1.0;
+      highlightPoints = [];
     }
     if (currentTool === 'draw' || currentTool === 'eraser' || currentTool === 'highlight') {
       saveState();
+    } else if (tempCanvas) {
+      // Remove the shape preview that was not finished.
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(tempCanvas, 0, 0);
     }
   }
   isDrawing = false;
@@ -568,7 +609,31 @@ canvas.addEventListener('mouseleave', () => {
   if (sizeIndicator) sizeIndicator.style.display = 'none';
 });
 
-// Drawing functions (same as before - keeping them for brevity)
+function drawHighlight() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(tempCanvas, 0, 0);
+  ctx.save();
+  ctx.globalAlpha = 0.35;
+  ctx.strokeStyle = currentColor;
+  ctx.lineWidth = currentSize * 3;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.beginPath();
+  ctx.moveTo(highlightPoints[0].x, highlightPoints[0].y);
+  highlightPoints.forEach(point => ctx.lineTo(point.x, point.y));
+  ctx.stroke();
+  ctx.restore();
+}
+
+function normalizeRect(x1, y1, x2, y2) {
+  const left = Math.max(0, Math.round(Math.min(x1, x2)));
+  const top = Math.max(0, Math.round(Math.min(y1, y2)));
+  const right = Math.min(canvas.width, Math.round(Math.max(x1, x2)));
+  const bottom = Math.min(canvas.height, Math.round(Math.max(y1, y2)));
+  return { left, top, width: right - left, height: bottom - top };
+}
+
+// Drawing functions
 function drawLine(x1, y1, x2, y2) {
   ctx.strokeStyle = currentColor;
   ctx.lineWidth = currentSize;
@@ -676,107 +741,59 @@ function drawStar(x1, y1, x2, y2) {
   ctx.fill();
 }
 
+// Gaussian blur. The strength follows the Size slider.
 function drawBlur(x1, y1, x2, y2) {
-  const width = Math.round(Math.abs(x2 - x1));
-  const height = Math.round(Math.abs(y2 - y1));
-  const startX = Math.round(Math.min(x1, x2));
-  const startY = Math.round(Math.min(y1, y2));
+  const { left, top, width, height } = normalizeRect(x1, y1, x2, y2);
   if (width < 1 || height < 1) return;
-  try {
-    const imageData = ctx.getImageData(startX, startY, width, height);
-    const pixels = imageData.data;
-    const pixelSize = 10;
-    for (let y = 0; y < height; y += pixelSize) {
-      for (let x = 0; x < width; x += pixelSize) {
-        let r = 0, g = 0, b = 0, count = 0;
-        for (let py = 0; py < pixelSize && y + py < height; py++) {
-          for (let px = 0; px < pixelSize && x + px < width; px++) {
-            const i = ((y + py) * width + (x + px)) * 4;
-            r += pixels[i];
-            g += pixels[i + 1];
-            b += pixels[i + 2];
-            count++;
-          }
-        }
-        r = Math.floor(r / count);
-        g = Math.floor(g / count);
-        b = Math.floor(b / count);
-        for (let py = 0; py < pixelSize && y + py < height; py++) {
-          for (let px = 0; px < pixelSize && x + px < width; px++) {
-            const i = ((y + py) * width + (x + px)) * 4;
-            pixels[i] = r;
-            pixels[i + 1] = g;
-            pixels[i + 2] = b;
-          }
-        }
-      }
-    }
-    ctx.putImageData(imageData, startX, startY);
-  } catch (error) {
-    console.error('Blur error:', error);
-    showStatus('Blur failed - area too large');
-  }
+  const radius = Math.max(4, currentSize * 2);
+  // Blur a larger area so the edges of the selection blur evenly.
+  const pad = radius * 2;
+  const sx = Math.max(0, left - pad);
+  const sy = Math.max(0, top - pad);
+  const sw = Math.min(canvas.width, left + width + pad) - sx;
+  const sh = Math.min(canvas.height, top + height + pad) - sy;
+
+  const blurred = document.createElement('canvas');
+  blurred.width = sw;
+  blurred.height = sh;
+  const blurCtx = blurred.getContext('2d');
+  blurCtx.filter = `blur(${radius}px)`;
+  blurCtx.drawImage(canvas, sx, sy, sw, sh, 0, 0, sw, sh);
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(left, top, width, height);
+  ctx.clip();
+  ctx.drawImage(blurred, sx, sy);
+  ctx.restore();
 }
 
+// Pixelate. The block size follows the Size slider.
 function drawPixelate(x1, y1, x2, y2) {
-  const width = Math.round(Math.abs(x2 - x1));
-  const height = Math.round(Math.abs(y2 - y1));
-  const startX = Math.round(Math.min(x1, x2));
-  const startY = Math.round(Math.min(y1, y2));
+  const { left, top, width, height } = normalizeRect(x1, y1, x2, y2);
   if (width < 1 || height < 1) return;
-  try {
-    const imageData = ctx.getImageData(startX, startY, width, height);
-    const pixels = imageData.data;
-    const pixelSize = 20;
-    for (let y = 0; y < height; y += pixelSize) {
-      for (let x = 0; x < width; x += pixelSize) {
-        const pixelIndex = (y * width + x) * 4;
-        const r = pixels[pixelIndex];
-        const g = pixels[pixelIndex + 1];
-        const b = pixels[pixelIndex + 2];
-        for (let py = 0; py < pixelSize && y + py < height; py++) {
-          for (let px = 0; px < pixelSize && x + px < width; px++) {
-            const i = ((y + py) * width + (x + px)) * 4;
-            pixels[i] = r;
-            pixels[i + 1] = g;
-            pixels[i + 2] = b;
-          }
-        }
-      }
-    }
-    ctx.putImageData(imageData, startX, startY);
-  } catch (error) {
-    console.error('Pixelate error:', error);
-    showStatus('Pixelate failed');
-  }
+  const block = Math.max(4, currentSize * 2);
+  const small = document.createElement('canvas');
+  small.width = Math.max(1, Math.round(width / block));
+  small.height = Math.max(1, Math.round(height / block));
+  small.getContext('2d').drawImage(canvas, left, top, width, height, 0, 0, small.width, small.height);
+
+  ctx.save();
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(small, 0, 0, small.width, small.height, left, top, width, height);
+  ctx.restore();
 }
 
 function cropImage(x1, y1, x2, y2) {
-  const left = Math.round(Math.min(x1, x2));
-  const top = Math.round(Math.min(y1, y2));
-  const width = Math.round(Math.abs(x2 - x1));
-  const height = Math.round(Math.abs(y2 - y1));
+  const { left, top, width, height } = normalizeRect(x1, y1, x2, y2);
   if (width < 10 || height < 10) return;
-  try {
-    const imageData = ctx.getImageData(left, top, width, height);
-    canvas.width = width;
-    canvas.height = height;
-    ctx.putImageData(imageData, 0, 0);
-    const croppedImg = new Image();
-    croppedImg.onload = () => {
-      currentImage = croppedImg;
-      layers = [];
-      saveState();
-      showStatus('Image cropped');
-    };
-    croppedImg.src = canvas.toDataURL();
-  } catch (error) {
-    console.error('Crop error:', error);
-    showStatus('Crop failed');
-  }
+  const imageData = ctx.getImageData(left, top, width, height);
+  canvas.width = width;
+  canvas.height = height;
+  ctx.putImageData(imageData, 0, 0);
+  showStatus('Image cropped');
 }
 
-// Premium tools - now all unlocked
 const btnResize = document.getElementById('btnResize');
 if (btnResize) {
   btnResize.addEventListener('click', () => {
@@ -817,6 +834,7 @@ if (btnResize) {
 }
 
 function resizeCanvas(width, height) {
+  flattenLayers();
   const temp = document.createElement('canvas');
   temp.width = canvas.width;
   temp.height = canvas.height;
@@ -837,6 +855,7 @@ if (btnWatermark) {
   btnWatermark.addEventListener('click', () => {
     const text = prompt('Enter watermark text:');
     if (!text) return;
+    flattenLayers();
     
     const size = Math.max(20, Math.min(canvas.width, canvas.height) / 20);
     
@@ -871,21 +890,17 @@ if (btnRotate) {
   });
 }
 
+// Any angle. The canvas grows to the rotated bounding box, so no corner
+// is clipped. New corner areas are transparent.
 function rotateCanvas(degrees) {
-  const temp = document.createElement('canvas');
-  temp.width = canvas.width;
-  temp.height = canvas.height;
-  temp.getContext('2d').drawImage(canvas, 0, 0);
-  
+  flattenLayers();
+  const temp = copyCanvas(canvas);
   const radians = (degrees * Math.PI) / 180;
+  const sin = Math.abs(Math.sin(radians));
+  const cos = Math.abs(Math.cos(radians));
   
-  if (degrees === 90 || degrees === 270) {
-    canvas.width = temp.height;
-    canvas.height = temp.width;
-  }
-  
-  ctx.fillStyle = 'white';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  canvas.width = Math.max(1, Math.round(temp.width * cos + temp.height * sin));
+  canvas.height = Math.max(1, Math.round(temp.width * sin + temp.height * cos));
   
   ctx.save();
   ctx.translate(canvas.width / 2, canvas.height / 2);
@@ -906,11 +921,13 @@ if (btnFlip) {
 }
 
 function flipCanvas(direction) {
+  flattenLayers();
   const temp = document.createElement('canvas');
   temp.width = canvas.width;
   temp.height = canvas.height;
   temp.getContext('2d').drawImage(canvas, 0, 0);
   
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.save();
   
   if (direction === 'horizontal') {
@@ -959,6 +976,7 @@ function showSliderModal(title, min, max, initial, callback) {
   
   if (!modal || !backdrop) return;
   
+  flattenLayers();
   originalImageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
   
   sliderTitle.textContent = title;
@@ -1060,6 +1078,7 @@ if (btnGrayscale) {
 }
 
 function applyGrayscale() {
+  flattenLayers();
   const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
   const pixels = imageData.data;
   
@@ -1083,6 +1102,7 @@ if (btnSepia) {
 }
 
 function applySepia() {
+  flattenLayers();
   const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
   const pixels = imageData.data;
   
@@ -1109,6 +1129,7 @@ if (btnInvert) {
 }
 
 function applyInvert() {
+  flattenLayers();
   const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
   const pixels = imageData.data;
   
@@ -1131,6 +1152,7 @@ if (btnSharpen) {
 }
 
 function applySharpen() {
+  flattenLayers();
   const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
   const pixels = imageData.data;
   const width = canvas.width;
@@ -1173,6 +1195,7 @@ if (btnVintage) {
 }
 
 function applyVintage() {
+  flattenLayers();
   const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
   const pixels = imageData.data;
   
@@ -1208,6 +1231,7 @@ if (btnVignette) {
 }
 
 function applyVignette() {
+  flattenLayers();
   const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
   const pixels = imageData.data;
   const centerX = canvas.width / 2;
@@ -1241,6 +1265,7 @@ if (btnNoise) {
 }
 
 function applyNoise() {
+  flattenLayers();
   const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
   const pixels = imageData.data;
   const amount = 25;
@@ -1288,6 +1313,7 @@ if (btnRemoveBg) {
 }
 
 function removeBackground(tolerance) {
+  flattenLayers();
   try {
     const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
     const pixels = imageData.data;
@@ -1397,35 +1423,37 @@ function showTextModal(x, y) {
   const backdrop = document.getElementById('modalBackdrop');
   const modal = document.getElementById('textModal');
   const textInput = document.getElementById('textInput');
-  const btnAddText = document.getElementById('btnAddText');
   
-  if (!backdrop || !modal || !textInput || !btnAddText) return;
+  if (!backdrop || !modal || !textInput) return;
   
+  pendingTextPosition = { x, y };
   backdrop.classList.add('active');
   modal.classList.add('active');
   textInput.value = '';
   textInput.focus();
-
-  const addTextHandler = () => {
-    const text = textInput.value;
-    if (text) {
-      ctx.font = `${currentSize * 4}px Arial`;
-      ctx.fillStyle = currentColor;
-      ctx.fillText(text, x, y);
-      saveState();
-    }
-    closeTextModal();
-    btnAddText.removeEventListener('click', addTextHandler);
-  };
-
-  btnAddText.addEventListener('click', addTextHandler);
 }
+
+// One listener for the whole page. The old code added a listener per
+// click and never removed it when the modal closed without text.
+function addPendingText() {
+  const text = document.getElementById('textInput').value;
+  if (text && pendingTextPosition) {
+    ctx.font = `${currentSize * 4}px Arial`;
+    ctx.fillStyle = currentColor;
+    ctx.fillText(text, pendingTextPosition.x, pendingTextPosition.y);
+    saveState();
+  }
+  closeTextModal();
+}
+
+document.getElementById('btnAddText').addEventListener('click', addPendingText);
 
 function closeTextModal() {
   const backdrop = document.getElementById('modalBackdrop');
   const modal = document.getElementById('textModal');
   if (backdrop) backdrop.classList.remove('active');
   if (modal) modal.classList.remove('active');
+  pendingTextPosition = null;
 }
 
 const modalBackdrop = document.getElementById('modalBackdrop');
@@ -1435,30 +1463,54 @@ if (modalBackdrop) {
 
 const textInput = document.getElementById('textInput');
 if (textInput) {
-  textInput.addEventListener('keypress', (e) => {
+  textInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
-      const btnAddText = document.getElementById('btnAddText');
-      if (btnAddText) btnAddText.click();
+      addPendingText();
+    } else if (e.key === 'Escape') {
+      closeTextModal();
     }
   });
 }
 
+function snapshot() {
+  return {
+    base: copyCanvas(layers.length ? layerBase : canvas),
+    layers: layers.map(layer => ({ ...layer }))
+  };
+}
+
+function applySnapshot(state) {
+  canvas.width = state.base.width;
+  canvas.height = state.base.height;
+  ctx.drawImage(state.base, 0, 0);
+  layers = state.layers.map(layer => ({ ...layer }));
+  layerBase = layers.length ? copyCanvas(state.base) : null;
+  if (layers.length) redrawCanvas();
+  applyZoom();
+}
+
+function stateBytes(state) {
+  return state.base.width * state.base.height * 4;
+}
+
 function saveState() {
-  historyStep++;
-  if (historyStep < history.length) {
-    history.length = historyStep;
-  }
-  history.push(canvas.toDataURL());
-  if (history.length > 50) {
-    history.shift();
+  // A new edit removes the redo steps.
+  history.length = historyStep + 1;
+  history.push(snapshot());
+  historyStep = history.length - 1;
+
+  let bytes = history.reduce((sum, state) => sum + stateBytes(state), 0);
+  while (history.length > 2 && (history.length > HISTORY_MAX_STATES || bytes > HISTORY_MAX_BYTES)) {
+    bytes -= stateBytes(history.shift());
     historyStep--;
   }
+  applyZoom();
 }
 
 function undo() {
   if (historyStep > 0) {
     historyStep--;
-    restoreState(history[historyStep]);
+    applySnapshot(history[historyStep]);
     showStatus('Undo');
   }
 }
@@ -1466,20 +1518,9 @@ function undo() {
 function redo() {
   if (historyStep < history.length - 1) {
     historyStep++;
-    restoreState(history[historyStep]);
+    applySnapshot(history[historyStep]);
     showStatus('Redo');
   }
-}
-
-function restoreState(dataUrl) {
-  const img = new Image();
-  img.onload = () => {
-    canvas.width = img.width;
-    canvas.height = img.height;
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(img, 0, 0);
-  };
-  img.src = dataUrl;
 }
 
 const btnUndo = document.getElementById('btnUndo');
@@ -1488,55 +1529,115 @@ if (btnUndo) btnUndo.addEventListener('click', undo);
 if (btnRedo) btnRedo.addEventListener('click', redo);
 
 document.addEventListener('keydown', (e) => {
-  if (e.ctrlKey || e.metaKey) {
-    if (e.key === 'z') {
-      e.preventDefault();
-      undo();
-    } else if (e.key === 'y') {
-      e.preventDefault();
-      redo();
-    } else if (e.key === 's') {
-      e.preventDefault();
-      saveImage();
-    }
+  if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+  if (e.target.tagName === 'INPUT') return;
+  const key = e.key.toLowerCase();
+  if (key === 'z' && !e.shiftKey) {
+    e.preventDefault();
+    undo();
+  } else if (key === 'y' || (key === 'z' && e.shiftKey)) {
+    e.preventDefault();
+    redo();
+  } else if (key === 's') {
+    e.preventDefault();
+    saveImage(e.shiftKey);
+  } else if (key === 'c' && !e.shiftKey && !String(window.getSelection())) {
+    e.preventDefault();
+    copyImage();
   }
 });
 
 const btnClear = document.getElementById('btnClear');
 if (btnClear) {
   btnClear.addEventListener('click', () => {
-    if (confirm('Clear all edits?')) {
-      layers = [];
-      ctx.fillStyle = 'white';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      
-      if (currentImage) {
-        ctx.drawImage(currentImage, 0, 0);
-      }
-      
+    if (!originalState) return;
+    if (confirm('Revert to the original image? You can undo this.')) {
+      applySnapshot(originalState);
       saveState();
-      showStatus('Canvas cleared');
+      showStatus('Reverted to the original image');
     }
   });
 }
 
 const btnSave = document.getElementById('btnSave');
 if (btnSave) {
-  btnSave.addEventListener('click', saveImage);
+  btnSave.addEventListener('click', () => saveImage());
 }
 
-function saveImage() {
-  canvas.toBlob((blob) => {
-    const url = URL.createObjectURL(blob);
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `edited-${timestamp}.png`;
-    a.click();
-    URL.revokeObjectURL(url);
-    showStatus('Image saved!');
-  });
+function hasImage() {
+  return canvas.style.display !== 'none';
 }
+
+// Save with the format, folder and Save As settings from the options page.
+async function saveImage(forceSaveAs = false) {
+  if (!hasImage()) return;
+  try {
+    const settings = await getSettings();
+    const blob = await encodeCanvas(canvas, settings.imageFormat, settings.jpegQuality);
+    const filename = buildFilename(documentName, extensionForMimeType(blob.type), settings.downloadFolder);
+    const downloadId = await downloadBlob(blob, filename, forceSaveAs || settings.saveAs);
+    if (downloadId !== null) showStatus(`Saved: ${filename}`);
+  } catch (error) {
+    console.error('Save failed:', error);
+    showStatus(`Save failed: ${error.message}`);
+  }
+}
+
+async function copyImage() {
+  if (!hasImage()) return;
+  try {
+    await copyImageBlob(await encodeCanvas(canvas, 'png'));
+    showStatus('Image copied to the clipboard');
+  } catch (error) {
+    console.error('Copy failed:', error);
+    showStatus(`Copy failed: ${error.message}`);
+  }
+}
+
+const btnSaveAs = document.getElementById('btnSaveAs');
+if (btnSaveAs) btnSaveAs.addEventListener('click', () => saveImage(true));
+const btnCopy = document.getElementById('btnCopy');
+if (btnCopy) btnCopy.addEventListener('click', copyImage);
+
+// Zoom: null fits the image in the window (never larger than 100%).
+const ZOOM_STEPS = [0.1, 0.25, 0.33, 0.5, 0.67, 0.75, 1, 1.25, 1.5, 2, 3, 4];
+
+function fitZoom() {
+  const container = canvas.parentElement;
+  const style = getComputedStyle(container);
+  const availableWidth = container.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+  const availableHeight = container.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom);
+  return Math.min(1, availableWidth / canvas.width, availableHeight / canvas.height);
+}
+
+function currentZoom() {
+  return zoomLevel === null ? fitZoom() : zoomLevel;
+}
+
+function applyZoom() {
+  const zoom = currentZoom();
+  canvas.style.width = `${Math.max(1, Math.round(canvas.width * zoom))}px`;
+  canvas.style.height = `${Math.max(1, Math.round(canvas.height * zoom))}px`;
+  const zoomLabel = document.getElementById('zoomLabel');
+  if (zoomLabel) zoomLabel.textContent = zoomLevel === null ? `Fit ${Math.round(zoom * 100)}%` : `${Math.round(zoom * 100)}%`;
+}
+
+function stepZoom(direction) {
+  const zoom = currentZoom();
+  const next = direction > 0
+    ? ZOOM_STEPS.find(step => step > zoom + 0.001)
+    : [...ZOOM_STEPS].reverse().find(step => step < zoom - 0.001);
+  if (next) {
+    zoomLevel = next;
+    applyZoom();
+  }
+}
+
+document.getElementById('btnZoomIn').addEventListener('click', () => stepZoom(1));
+document.getElementById('btnZoomOut').addEventListener('click', () => stepZoom(-1));
+document.getElementById('btnZoomFit').addEventListener('click', () => { zoomLevel = null; applyZoom(); });
+document.getElementById('btnZoomActual').addEventListener('click', () => { zoomLevel = 1; applyZoom(); });
+window.addEventListener('resize', () => { if (zoomLevel === null) applyZoom(); });
 
 function showStatus(message) {
   const status = document.getElementById('status');
@@ -1548,3 +1649,5 @@ function showStatus(message) {
     }, 2000);
   }
 }
+
+loadCaptureFromUrl();

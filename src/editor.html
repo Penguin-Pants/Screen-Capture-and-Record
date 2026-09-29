@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ScreenCapture Pro - Editor</title>
+  <title>Editor - Screen Capture and Record</title>
   <style>
     * {
       margin: 0;
@@ -34,6 +34,7 @@
 
     .tool-group {
       display: flex;
+      flex-wrap: wrap;
       gap: 5px;
       padding: 0 10px;
       border-right: 1px solid #3a3a3a;
@@ -68,22 +69,17 @@
       border-color: #667eea;
     }
 
-    .tool-btn.premium {
-      position: relative;
-      background: linear-gradient(135deg, #ffd700 0%, #ffed4e 100%);
-      color: #333;
+    .tool-btn:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
     }
 
-    .tool-btn.premium:hover {
-      background: linear-gradient(135deg, #ffed4e 0%, #ffd700 100%);
-    }
-
-    .tool-btn.premium.locked::after {
-      content: '🔒';
-      position: absolute;
-      top: -5px;
-      right: -5px;
+    .zoom-label {
+      min-width: 48px;
+      text-align: center;
+      color: #999;
       font-size: 12px;
+      align-self: center;
     }
 
     .color-picker {
@@ -100,9 +96,9 @@
 
     .canvas-container {
       flex: 1;
+      min-height: 0;
       display: flex;
-      align-items: center;
-      justify-content: center;
+      padding: 20px;
       overflow: auto;
       background: #1a1a1a;
       position: relative;
@@ -115,11 +111,12 @@
       background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
     }
 
+    /* margin: auto centers a small canvas and keeps a large one scrollable. */
     #canvas {
-      border: 2px solid #3a3a3a;
+      margin: auto;
+      flex: none;
+      outline: 2px solid #3a3a3a;
       cursor: crosshair;
-      max-width: 90%;
-      max-height: 90%;
     }
 
     .preview-overlay {
@@ -148,7 +145,7 @@
       padding: 60px;
       border: 3px dashed #3a3a3a;
       border-radius: 15px;
-      margin: 40px;
+      margin: auto;
     }
 
     .upload-area h2 {
@@ -256,8 +253,10 @@
     <div class="tool-group">
       <button class="tool-btn" id="btnUpload">📁 Open</button>
       <button class="tool-btn" id="btnNew">🆕 New</button>
-      <button class="tool-btn" id="btnSave">💾 Save</button>
-      <button class="tool-btn" id="btnClear">🗑️ Clear</button>
+      <button class="tool-btn" id="btnSave" title="Save (Ctrl+S)">💾 Save</button>
+      <button class="tool-btn" id="btnSaveAs" title="Save as (Ctrl+Shift+S)">📂 Save As</button>
+      <button class="tool-btn" id="btnCopy" title="Copy image (Ctrl+C)">📋 Copy</button>
+      <button class="tool-btn" id="btnClear" title="Revert to the original image">🗑️ Revert</button>
     </div>
 
     <div class="tool-group">
@@ -276,27 +275,27 @@
       <button class="tool-btn" id="btnPixelate" data-tool="pixelate">◻️ Pixelate</button>
       <button class="tool-btn" id="btnEraser" data-tool="eraser">🧹 Eraser</button>
       <button class="tool-btn" id="btnEyedropper" data-tool="eyedropper">💧 Picker</button>
-      <button class="tool-btn premium" id="btnMove" data-tool="move">✋ Move</button>
+      <button class="tool-btn" id="btnMove" data-tool="move" title="Move image layers. A layer merges into the image when you use another tool.">✋ Move</button>
     </div>
 
     <div class="tool-group">
-      <button class="tool-btn premium" id="btnCrop" data-tool="crop">✂️ Crop</button>
-      <button class="tool-btn premium" id="btnResize">↔️ Resize</button>
-      <button class="tool-btn premium" id="btnRotate">🔄 Rotate</button>
-      <button class="tool-btn premium" id="btnFlip">🔃 Flip</button>
-      <button class="tool-btn premium" id="btnBrightness">☀️ Brightness</button>
-      <button class="tool-btn premium" id="btnContrast">◐ Contrast</button>
-      <button class="tool-btn premium" id="btnSaturate">🎨 Saturate</button>
-      <button class="tool-btn premium" id="btnGrayscale">⚪ Grayscale</button>
-      <button class="tool-btn premium" id="btnSepia">🟤 Sepia</button>
-      <button class="tool-btn premium" id="btnInvert">🔄 Invert</button>
-      <button class="tool-btn premium" id="btnSharpen">🔍 Sharpen</button>
-      <button class="tool-btn premium" id="btnVintage">📷 Vintage</button>
-      <button class="tool-btn premium" id="btnVignette">🎭 Vignette</button>
-      <button class="tool-btn premium" id="btnNoise">📡 Noise</button>
-      <button class="tool-btn premium" id="btnWatermark">© Mark</button>
-      <button class="tool-btn premium" id="btnAddImage">🖼️ Layer</button>
-      <button class="tool-btn premium" id="btnRemoveBg">🎭 Remove BG</button>
+      <button class="tool-btn" id="btnCrop" data-tool="crop">✂️ Crop</button>
+      <button class="tool-btn" id="btnResize">↔️ Resize</button>
+      <button class="tool-btn" id="btnRotate">🔄 Rotate</button>
+      <button class="tool-btn" id="btnFlip">🔃 Flip</button>
+      <button class="tool-btn" id="btnBrightness">☀️ Brightness</button>
+      <button class="tool-btn" id="btnContrast">◐ Contrast</button>
+      <button class="tool-btn" id="btnSaturate">🎨 Saturate</button>
+      <button class="tool-btn" id="btnGrayscale">⚪ Grayscale</button>
+      <button class="tool-btn" id="btnSepia">🟤 Sepia</button>
+      <button class="tool-btn" id="btnInvert">🔄 Invert</button>
+      <button class="tool-btn" id="btnSharpen">🔍 Sharpen</button>
+      <button class="tool-btn" id="btnVintage">📷 Vintage</button>
+      <button class="tool-btn" id="btnVignette">🎭 Vignette</button>
+      <button class="tool-btn" id="btnNoise">📡 Noise</button>
+      <button class="tool-btn" id="btnWatermark">© Mark</button>
+      <button class="tool-btn" id="btnAddImage" title="Add an image as a movable layer">🖼️ Layer</button>
+      <button class="tool-btn" id="btnRemoveBg">🎭 Remove BG</button>
     </div>
 
     <div class="tool-group">
@@ -308,17 +307,25 @@
     </div>
 
     <div class="tool-group">
-      <button class="tool-btn" id="btnUndo">↩️ Undo</button>
-      <button class="tool-btn" id="btnRedo">↪️ Redo</button>
+      <button class="tool-btn" id="btnUndo" title="Undo (Ctrl+Z)">↩️ Undo</button>
+      <button class="tool-btn" id="btnRedo" title="Redo (Ctrl+Y)">↪️ Redo</button>
+    </div>
+
+    <div class="tool-group">
+      <button class="tool-btn" id="btnZoomOut" title="Zoom out">➖</button>
+      <span class="zoom-label" id="zoomLabel">Fit</span>
+      <button class="tool-btn" id="btnZoomIn" title="Zoom in">➕</button>
+      <button class="tool-btn" id="btnZoomFit" title="Fit to window">Fit</button>
+      <button class="tool-btn" id="btnZoomActual" title="Actual size">100%</button>
     </div>
   </div>
 
   <div class="canvas-container">
     <div class="upload-area" id="uploadArea">
       <h2>📸 Open an Image to Start Editing</h2>
-      <p>Upload a screenshot or drag & drop here</p>
+      <p>Open a file, or drag and drop it here</p>
       <button class="btn-upload" id="btnOpenFile">Choose Image</button>
-      <p style="margin-top: 15px; font-size: 14px;">or paste from clipboard (Ctrl+V)</p>
+      <p style="margin-top: 15px; font-size: 14px;">or paste from the clipboard (Ctrl+V)</p>
     </div>
     <canvas id="canvas" style="display: none;"></canvas>
     <div class="preview-overlay" id="previewOverlay"></div>
@@ -348,6 +355,7 @@
 
   <div class="status" id="status"></div>
 
+  <script src="common.js"></script>
   <script src="editor.js"></script>
 </body>
 </html>
