@@ -410,3 +410,49 @@ test('recorder countdown can be cancelled by ending the share', { skip }, async 
   assert.equal(liveTracks, 0);
   await context.close();
 });
+
+test('remove background clears the edge color and smooths the cut edge', { skip }, async () => {
+  const { page, context, errors } = await openEditorWithCapture();
+  const result = await page.evaluate(() => {
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, 400, 300);
+    ctx.fillStyle = '#ff0000';
+    ctx.fillRect(100, 100, 100, 100);
+    saveState();
+    const start = performance.now();
+    removeBackground(30);
+    const alpha = (x, y) => ctx.getImageData(x, y, 1, 1).data[3];
+    return { ms: performance.now() - start, bg: alpha(10, 10), inside: alpha(150, 150), edge: alpha(100, 150), corner: alpha(100, 100) };
+  });
+  assert.equal(result.bg, 0, 'background is transparent');
+  assert.equal(result.inside, 255, 'object inside stays opaque');
+  assert.ok(result.edge > 0 && result.edge < 255, `edge pixel has partial alpha, got ${result.edge}`);
+  assert.ok(result.corner < result.edge, 'corner pixel is more transparent than a side pixel');
+  assert.deepEqual(errors, []);
+  await context.close();
+});
+
+test('full-page capture restores the scroll position when a step fails', { skip }, async () => {
+  const { page, context } = await openPage('options.html');
+  await page.addScriptTag({ path: path.join(SRC, 'capture.js') });
+  const result = await page.evaluate(async () => {
+    const codes = [];
+    browser.tabs.executeScript = async (tabId, { code }) => {
+      codes.push(code);
+      if (code.includes('scrollWidth')) return [{ width: 800, height: 3000, scrollX: 0, scrollY: 777, viewportHeight: 600, dpr: 1 }];
+      if (code.includes('innerHeight')) throw new Error('lazy pass failed');
+      return [true];
+    };
+    browser.tabs.captureTab = async () => { throw new Error('should not capture'); };
+    let message = '';
+    try {
+      await captureFullPage({ id: 1 }, { loadLazyContent: true });
+    } catch (error) {
+      message = error.message;
+    }
+    return { message, last: codes[codes.length - 1] };
+  });
+  assert.equal(result.message, 'lazy pass failed');
+  assert.match(result.last, /top: 777/);
+  await context.close();
+});

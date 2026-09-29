@@ -1341,73 +1341,71 @@ function removeBackground(tolerance) {
     bgG = Math.floor(bgG / samples.length);
     bgB = Math.floor(bgB / samples.length);
     
-    const toProcess = [];
-    const processed = new Set();
-    
-    for (let x = 0; x < canvas.width; x++) {
-      toProcess.push([x, 0]);
-      toProcess.push([x, canvas.height - 1]);
-    }
-    for (let y = 0; y < canvas.height; y++) {
-      toProcess.push([0, y]);
-      toProcess.push([canvas.width - 1, y]);
-    }
-    
-    while (toProcess.length > 0) {
-      const [x, y] = toProcess.pop();
-      const key = `${x},${y}`;
-      
-      if (processed.has(key) || x < 0 || y < 0 || x >= canvas.width || y >= canvas.height) {
-        continue;
+    // Flood fill from the edges. Typed arrays and numeric pixel indices
+    // keep this fast and small on large screenshots.
+    const width = canvas.width;
+    const height = canvas.height;
+    const removed = new Uint8Array(width * height);
+    const queued = new Uint8Array(width * height);
+    const stack = [];
+    const push = (index) => {
+      if (!queued[index]) {
+        queued[index] = 1;
+        stack.push(index);
       }
-      
-      processed.add(key);
-      
-      const i = (y * canvas.width + x) * 4;
-      const r = pixels[i];
-      const g = pixels[i + 1];
-      const b = pixels[i + 2];
-      
-      const diff = Math.sqrt(
-        Math.pow(r - bgR, 2) + 
-        Math.pow(g - bgG, 2) + 
-        Math.pow(b - bgB, 2)
-      );
-      
-      if (diff < tolerance) {
-        pixels[i + 3] = 0;
-        
-        toProcess.push([x + 1, y]);
-        toProcess.push([x - 1, y]);
-        toProcess.push([x, y + 1]);
-        toProcess.push([x, y - 1]);
-      }
+    };
+    
+    for (let x = 0; x < width; x++) {
+      push(x);
+      push((height - 1) * width + x);
+    }
+    for (let y = 0; y < height; y++) {
+      push(y * width);
+      push(y * width + width - 1);
     }
     
-    const smoothData = new Uint8ClampedArray(pixels);
-    for (let y = 1; y < canvas.height - 1; y++) {
-      for (let x = 1; x < canvas.width - 1; x++) {
-        const i = (y * canvas.width + x) * 4;
-        
-        if (pixels[i + 3] > 0 && pixels[i + 3] < 255) {
-          let alphaSum = 0;
-          let count = 0;
-          
-          for (let dy = -1; dy <= 1; dy++) {
-            for (let dx = -1; dx <= 1; dx++) {
-              const ni = ((y + dy) * canvas.width + (x + dx)) * 4;
-              alphaSum += pixels[ni + 3];
-              count++;
-            }
+    const toleranceSq = tolerance * tolerance;
+    while (stack.length > 0) {
+      const index = stack.pop();
+      const i = index * 4;
+      const dr = pixels[i] - bgR;
+      const dg = pixels[i + 1] - bgG;
+      const db = pixels[i + 2] - bgB;
+      if (dr * dr + dg * dg + db * db >= toleranceSq) continue;
+      
+      removed[index] = 1;
+      const x = index % width;
+      if (x > 0) push(index - 1);
+      if (x < width - 1) push(index + 1);
+      if (index >= width) push(index - width);
+      if (index < width * (height - 1)) push(index + width);
+    }
+    
+    // Edge smoothing: a kept pixel next to removed pixels gets partial
+    // alpha, in proportion to the kept pixels around it.
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const index = y * width + x;
+        if (removed[index]) {
+          pixels[index * 4 + 3] = 0;
+          continue;
+        }
+        let kept = 0;
+        let total = 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          const ny = y + dy;
+          if (ny < 0 || ny >= height) continue;
+          for (let dx = -1; dx <= 1; dx++) {
+            const nx = x + dx;
+            if (nx < 0 || nx >= width) continue;
+            total++;
+            if (!removed[ny * width + nx]) kept++;
           }
-          
-          smoothData[i + 3] = Math.floor(alphaSum / count);
+        }
+        if (kept < total) {
+          pixels[index * 4 + 3] = Math.round(pixels[index * 4 + 3] * kept / total);
         }
       }
-    }
-    
-    for (let i = 3; i < pixels.length; i += 4) {
-      pixels[i] = smoothData[i];
     }
     
     ctx.putImageData(imageData, 0, 0);

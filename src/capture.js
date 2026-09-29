@@ -96,13 +96,15 @@ async function captureRect(tab, rect, scale) {
 
 async function captureFullPage(tab, { loadLazyContent = true } = {}) {
   const [before] = await browser.tabs.executeScript(tab.id, { code: PAGE_METRICS_CODE });
-  if (loadLazyContent) {
-    await browser.tabs.executeScript(tab.id, { code: LOAD_LAZY_CONTENT_CODE });
-  } else {
-    await browser.tabs.executeScript(tab.id, { code: scrollToCode(before.scrollX, 0) });
-  }
 
+  // Every step after this can scroll the page, so restore it in "finally".
   try {
+    if (loadLazyContent) {
+      await browser.tabs.executeScript(tab.id, { code: LOAD_LAZY_CONTENT_CODE });
+    } else {
+      await browser.tabs.executeScript(tab.id, { code: scrollToCode(before.scrollX, 0) });
+    }
+
     // Measure again: lazy content can make the page taller.
     const [page] = await browser.tabs.executeScript(tab.id, { code: PAGE_METRICS_CODE });
     const plan = planFullPage(page.width, page.height, page.dpr);
