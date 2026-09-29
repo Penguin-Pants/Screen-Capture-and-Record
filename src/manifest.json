@@ -2,7 +2,7 @@
   "manifest_version": 2,
   "name": "Screen Capture and Record",
   "version": "2.0.0",
-  "description": "Capture the visible area, a selected area or the full page, annotate the image and record your screen. All processing stays on your device.",
+  "description": "Record your screen with your webcam and microphone, and save small videos that are easy to share. Everything stays on your device.",
   "icons": {
     "16": "icons/icon16.png",
     "32": "icons/icon32.png",
@@ -11,58 +11,39 @@
     "128": "icons/icon128.png"
   },
   "permissions": [
-    "<all_urls>",
-    "tabs",
     "downloads",
-    "storage",
-    "notifications",
-    "clipboardWrite"
+    "storage"
   ],
   "background": {
     "scripts": [
-      "common.js",
-      "capture.js",
       "background.js"
     ],
     "persistent": true
   },
   "browser_action": {
-    "default_popup": "popup.html",
     "default_icon": {
       "16": "icons/icon16.png",
       "32": "icons/icon32.png",
       "48": "icons/icon48.png"
     },
-    "default_title": "Screen Capture and Record"
+    "default_title": "Open the screen recorder"
   },
   "options_ui": {
     "page": "options.html",
     "open_in_tab": true
   },
   "commands": {
-    "capture-area": {
+    "_execute_browser_action": {
       "suggested_key": {
-        "default": "Alt+Shift+A"
+        "default": "Alt+Shift+R"
       },
-      "description": "Capture a selected area"
-    },
-    "capture-visible": {
-      "suggested_key": {
-        "default": "Alt+Shift+S"
-      },
-      "description": "Capture the visible area"
-    },
-    "capture-fullpage": {
-      "suggested_key": {
-        "default": "Alt+Shift+F"
-      },
-      "description": "Capture the full page"
+      "description": "Open the screen recorder"
     }
   },
   "browser_specific_settings": {
     "gecko": {
       "id": "screen-capture-and-record@penguin-pants",
-      "strict_min_version": "115.0",
+      "strict_min_version": "130.0",
       "data_collection_permissions": {
         "required": ["none"]
       }

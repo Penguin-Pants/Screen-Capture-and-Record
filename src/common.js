@@ -1,23 +1,20 @@
-// Shared helpers for all extension pages (background, editor, recorder, options).
+// Shared helpers for the extension pages (background, recorder, options).
 'use strict';
 
 const SETTINGS_DEFAULTS = Object.freeze({
-  afterCapture: 'editor',   // 'editor' | 'download' | 'clipboard'
-  imageFormat: 'png',       // 'png' | 'jpeg'
-  jpegQuality: 92,          // 1-100
-  downloadFolder: '',       // Subfolder inside the Downloads folder
-  saveAs: false,            // Show the "Save as" dialog for each file
-  loadLazyContent: true     // Scroll the page once before a full-page capture
-});
-
-const RECORDER_DEFAULTS = Object.freeze({
-  profile: 'high',          // A RECORDING_PROFILES id
-  afterRecording: 'review', // 'review' | 'save'
-  exportPreset: 'medium',   // 'original' or an EXPORT_PRESETS id
-  exportFormat: 'webm',     // 'webm' | 'mp4'
+  profile: 'high',              // A RECORDING_PROFILES id
+  afterRecording: 'review',     // 'review' | 'save'
+  exportPreset: 'medium',       // 'original' or an EXPORT_PRESETS id
+  exportFormat: 'webm',         // 'webm' | 'mp4'
   countdown: 3,
   microphone: false,
-  systemAudio: false
+  systemAudio: false,
+  camera: false,                // Record the webcam too
+  cameraDeviceId: '',           // Empty means the default camera
+  cameraPosition: 'bottom-right', // A CAMERA_POSITIONS id, or 'hidden'
+  cameraSize: 'medium',         // A CAMERA_SIZES id
+  downloadFolder: '',           // Subfolder inside the Downloads folder
+  saveAs: false                 // Show the "Save as" dialog for each file
 });
 
 // File size depends only on bitrate and length: bytes = bits per second
@@ -48,32 +45,44 @@ const EXPORT_ESTIMATE_MARGIN = 1.1;
 // A preset must save at least this share of the original size to be offered.
 const EXPORT_MIN_SAVING = 0.1;
 
-async function getSettings() {
-  const { settings } = await browser.storage.local.get('settings');
-  return { ...SETTINGS_DEFAULTS, ...settings };
-}
+// The webcam records to its own file while you record. When you save, it
+// is drawn as a round "bubble" in a corner of the screen video.
+const CAMERA_BITS_PER_SECOND = 1500000;
+const CAMERA_POSITIONS = Object.freeze([
+  { id: 'bottom-right', label: 'Bottom right' },
+  { id: 'bottom-left', label: 'Bottom left' },
+  { id: 'top-right', label: 'Top right' },
+  { id: 'top-left', label: 'Top left' }
+]);
+// Bubble diameter as a share of the shorter video side.
+const CAMERA_SIZES = Object.freeze([
+  { id: 'small', label: 'Small', share: 0.2 },
+  { id: 'medium', label: 'Medium', share: 0.28 },
+  { id: 'large', label: 'Large', share: 0.36 }
+]);
+const CAMERA_MARGIN_SHARE = 0.03;
 
-async function saveSettings(patch) {
-  const settings = { ...(await getSettings()), ...patch };
-  await browser.storage.local.set({ settings });
+// Each setting has its own storage key ("setting.<name>"). A save writes
+// only the keys it changes, so two quick changes, or changes from two
+// pages, cannot overwrite each other.
+const SETTINGS_PREFIX = 'setting.';
+
+async function getSettings() {
+  const names = Object.keys(SETTINGS_DEFAULTS);
+  const stored = await browser.storage.local.get(names.map((name) => SETTINGS_PREFIX + name));
+  const settings = { ...SETTINGS_DEFAULTS };
+  for (const name of names) {
+    if (SETTINGS_PREFIX + name in stored) settings[name] = stored[SETTINGS_PREFIX + name];
+  }
   return settings;
 }
 
-async function getRecorderSettings() {
-  const { recorder } = await browser.storage.local.get('recorder');
-  return { ...RECORDER_DEFAULTS, ...recorder };
-}
-
-async function saveRecorderSettings(patch) {
-  const recorder = { ...(await getRecorderSettings()), ...patch };
-  await browser.storage.local.set({ recorder });
-  return recorder;
-}
-
-// Pages where Firefox does not allow extensions to capture or run scripts.
-function isRestrictedUrl(url = '') {
-  return /^(about|moz-extension|view-source|resource|chrome|jar):/i.test(url) ||
-    /^https?:\/\/(addons\.mozilla\.org|accounts\.firefox\.com)\//i.test(url);
+async function saveSettings(patch) {
+  const values = {};
+  for (const [name, value] of Object.entries(patch)) {
+    if (name in SETTINGS_DEFAULTS) values[SETTINGS_PREFIX + name] = value;
+  }
+  await browser.storage.local.set(values);
 }
 
 // Local time stamp that is safe in file names: 2026-09-29_14-05-09
@@ -99,60 +108,8 @@ function buildFilename(baseName, extension, folder) {
   return safeFolder ? `${safeFolder}/${name}` : name;
 }
 
-function imageMimeType(format) {
-  return format === 'jpeg' ? 'image/jpeg' : 'image/png';
-}
-
 function extensionForMimeType(mimeType) {
-  if (mimeType.startsWith('image/jpeg')) return 'jpg';
-  if (mimeType.startsWith('image/png')) return 'png';
-  if (mimeType.startsWith('video/mp4')) return 'mp4';
-  return 'webm';
-}
-
-// Encode a canvas to a Blob. JPEG has no alpha channel, so transparent
-// pixels get a white background instead of black.
-function encodeCanvas(canvas, format = 'png', quality = 92) {
-  let source = canvas;
-  if (format === 'jpeg') {
-    source = document.createElement('canvas');
-    source.width = canvas.width;
-    source.height = canvas.height;
-    const ctx = source.getContext('2d');
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, source.width, source.height);
-    ctx.drawImage(canvas, 0, 0);
-  }
-  return new Promise((resolve, reject) => {
-    source.toBlob((blob) => {
-      if (blob) resolve(blob);
-      else reject(new Error('The image is too large to encode.'));
-    }, imageMimeType(format), quality / 100);
-  });
-}
-
-async function blobToCanvas(blob) {
-  const bitmap = await createImageBitmap(blob);
-  const canvas = document.createElement('canvas');
-  canvas.width = bitmap.width;
-  canvas.height = bitmap.height;
-  canvas.getContext('2d').drawImage(bitmap, 0, 0);
-  bitmap.close();
-  return canvas;
-}
-
-function blobToDataUrl(blob) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = () => reject(reader.error);
-    reader.readAsDataURL(blob);
-  });
-}
-
-async function dataUrlToBlob(dataUrl) {
-  const response = await fetch(dataUrl);
-  return response.blob();
+  return mimeType.startsWith('video/mp4') ? 'mp4' : 'webm';
 }
 
 // Save a Blob with the downloads API. Returns the download ID, or null when
@@ -177,15 +134,9 @@ async function downloadBlob(blob, filename, saveAs = false) {
   return downloadId;
 }
 
-// Copy an image to the clipboard. Needs the "clipboardWrite" permission.
-async function copyImageBlob(blob) {
-  const type = blob.type === 'image/jpeg' ? 'jpeg' : 'png';
-  await browser.clipboard.setImageData(await blob.arrayBuffer(), type);
-}
-
 function getRecordingProfile(id) {
   return RECORDING_PROFILES.find((profile) => profile.id === id) ||
-    RECORDING_PROFILES.find((profile) => profile.id === RECORDER_DEFAULTS.profile);
+    RECORDING_PROFILES.find((profile) => profile.id === SETTINGS_DEFAULTS.profile);
 }
 
 // Decimal units, like most file managers and upload limits: 1 MB = 1,000,000 bytes.
@@ -207,7 +158,7 @@ function estimateBytes(bitsPerSecond, seconds) {
   return (bitsPerSecond * seconds) / 8;
 }
 
-// Upper estimate of the recording size per minute for a profile.
+// Upper estimate of the saved file size per minute for a profile.
 function bytesPerMinute(profile, audioBitsPerSecond = 0) {
   return estimateBytes(profile.videoBitsPerSecond + audioBitsPerSecond, 60);
 }
@@ -220,7 +171,7 @@ function fitWithin(width, height, maxWidth, maxHeight) {
   return { width: even(width), height: even(height) };
 }
 
-// Plan a smaller copy of a recording.
+// Plan a re-encoded copy of a recording.
 // source: { width, height, seconds, bytes, frameRate, hasAudio }
 function planExport(preset, source) {
   const size = fitWithin(source.width, source.height, preset.maxWidth, preset.maxHeight);
@@ -238,11 +189,26 @@ function planExport(preset, source) {
   };
 }
 
+// Where the camera bubble goes in a width x height video: a square box
+// (the bubble is a circle inside it) with an even diameter.
+function cameraBubbleRect(width, height, positionId, sizeId) {
+  const shorter = Math.min(width, height);
+  const size = CAMERA_SIZES.find((item) => item.id === sizeId) || CAMERA_SIZES[1];
+  const diameter = Math.max(2, 2 * Math.round((shorter * size.share) / 2));
+  const margin = Math.round(shorter * CAMERA_MARGIN_SHARE);
+  const position = CAMERA_POSITIONS.some((item) => item.id === positionId) ? positionId : CAMERA_POSITIONS[0].id;
+  return {
+    x: position.endsWith('left') ? margin : width - margin - diameter,
+    y: position.startsWith('top') ? margin : height - margin - diameter,
+    diameter
+  };
+}
+
 if (typeof module !== 'undefined') {
   module.exports = {
-    SETTINGS_DEFAULTS, RECORDER_DEFAULTS, RECORDING_PROFILES, EXPORT_PRESETS, EXPORT_ESTIMATE_MARGIN,
-    VOICE_AUDIO_BITS_PER_SECOND, isRestrictedUrl, fileTimestamp, sanitizeFolder, buildFilename, imageMimeType,
-    extensionForMimeType, getRecordingProfile, formatBytes, formatDuration, estimateBytes, bytesPerMinute,
-    fitWithin, planExport
+    SETTINGS_DEFAULTS, RECORDING_PROFILES, EXPORT_PRESETS, EXPORT_ESTIMATE_MARGIN, VOICE_AUDIO_BITS_PER_SECOND,
+    CAMERA_POSITIONS, CAMERA_SIZES, fileTimestamp, sanitizeFolder, buildFilename, extensionForMimeType,
+    getRecordingProfile, formatBytes, formatDuration, estimateBytes, bytesPerMinute, fitWithin, planExport,
+    cameraBubbleRect
   };
 }

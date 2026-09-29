@@ -2,61 +2,11 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { planFullPage, CANVAS_MAX_SIDE, CANVAS_MAX_AREA, TILE_MAX_AREA } = require('../src/capture.js');
 const {
-  sanitizeFolder, buildFilename, fileTimestamp, extensionForMimeType, isRestrictedUrl, RECORDING_PROFILES,
-  EXPORT_PRESETS, RECORDER_DEFAULTS, getRecordingProfile, formatBytes, formatDuration, bytesPerMinute, fitWithin,
-  planExport
+  sanitizeFolder, buildFilename, fileTimestamp, extensionForMimeType, RECORDING_PROFILES, EXPORT_PRESETS,
+  SETTINGS_DEFAULTS, CAMERA_POSITIONS, getRecordingProfile, formatBytes, formatDuration, bytesPerMinute, fitWithin,
+  planExport, cameraBubbleRect
 } = require('../src/common.js');
-
-function assertTilesCover(plan, cssHeight) {
-  let cssY = 0;
-  let deviceY = 0;
-  for (const tile of plan.tiles) {
-    assert.equal(tile.rect.y, cssY, 'tiles are contiguous in CSS pixels');
-    assert.equal(tile.drawY, deviceY, 'tiles are contiguous in device pixels');
-    assert.ok(tile.rect.width * plan.scale * tile.rect.height * plan.scale <= TILE_MAX_AREA * 1.05, 'tile fits the area budget');
-    cssY += tile.rect.height;
-    deviceY += tile.drawHeight;
-  }
-  assert.equal(cssY, cssHeight, 'tiles cover the full CSS height');
-  assert.equal(deviceY, plan.outHeight, 'tiles cover the full output height');
-}
-
-test('planFullPage keeps device pixel ratio for normal pages', () => {
-  const plan = planFullPage(1280, 5000, 2);
-  assert.equal(plan.scale, 2);
-  assert.equal(plan.reduced, false);
-  assert.equal(plan.outWidth, 2560);
-  assert.equal(plan.outHeight, 10000);
-  assertTilesCover(plan, 5000);
-});
-
-test('planFullPage handles fractional device pixel ratio without gaps', () => {
-  const plan = planFullPage(1366, 7777, 1.25);
-  assertTilesCover(plan, 7777);
-});
-
-test('planFullPage scales down pages above the canvas side limit', () => {
-  const plan = planFullPage(1280, 60000, 1);
-  assert.ok(plan.reduced);
-  assert.ok(plan.outHeight <= CANVAS_MAX_SIDE);
-  assert.ok(plan.outWidth * plan.outHeight <= CANVAS_MAX_AREA);
-  assertTilesCover(plan, 60000);
-});
-
-test('planFullPage scales down pages above the canvas area limit', () => {
-  const plan = planFullPage(8000, 20000, 1);
-  assert.ok(plan.reduced);
-  assert.ok(plan.outWidth * plan.outHeight <= CANVAS_MAX_AREA);
-  assertTilesCover(plan, 20000);
-});
-
-test('planFullPage handles a page smaller than one tile', () => {
-  const plan = planFullPage(300, 200, 1);
-  assert.equal(plan.tiles.length, 1);
-  assertTilesCover(plan, 200);
-});
 
 test('sanitizeFolder removes unsafe parts', () => {
   assert.equal(sanitizeFolder(''), '');
@@ -68,31 +18,21 @@ test('sanitizeFolder removes unsafe parts', () => {
 });
 
 test('buildFilename joins folder, name and extension', () => {
-  assert.equal(buildFilename('area-1', 'png', ''), 'area-1.png');
-  assert.equal(buildFilename('area-1', 'jpg', 'Shots/2026'), 'Shots/2026/area-1.jpg');
+  assert.equal(buildFilename('recording-1', 'webm', ''), 'recording-1.webm');
+  assert.equal(buildFilename('recording-1', 'mp4', 'Videos/2026'), 'Videos/2026/recording-1.mp4');
 });
 
 test('fileTimestamp uses local time and safe characters', () => {
   assert.equal(fileTimestamp(new Date(2026, 8, 29, 7, 5, 3)), '2026-09-29_07-05-03');
 });
 
-test('extensionForMimeType maps image and video types', () => {
-  assert.equal(extensionForMimeType('image/png'), 'png');
-  assert.equal(extensionForMimeType('image/jpeg'), 'jpg');
+test('extensionForMimeType maps video types', () => {
   assert.equal(extensionForMimeType('video/webm;codecs=vp9,opus'), 'webm');
   assert.equal(extensionForMimeType('video/mp4;codecs=avc1'), 'mp4');
 });
 
-test('isRestrictedUrl flags pages Firefox protects', () => {
-  assert.ok(isRestrictedUrl('about:addons'));
-  assert.ok(isRestrictedUrl('moz-extension://abc/editor.html'));
-  assert.ok(isRestrictedUrl('https://addons.mozilla.org/en-US/firefox/'));
-  assert.ok(!isRestrictedUrl('https://example.com/'));
-  assert.ok(!isRestrictedUrl(undefined));
-});
-
 test('recording profiles: default is 1080p, 30 fps, 2 Mbps (about 15 MB per minute)', () => {
-  const profile = getRecordingProfile(RECORDER_DEFAULTS.profile);
+  const profile = getRecordingProfile(SETTINGS_DEFAULTS.profile);
   assert.deepEqual(
     [profile.maxWidth, profile.maxHeight, profile.frameRate, profile.videoBitsPerSecond],
     [1920, 1080, 30, 2000000]
@@ -138,4 +78,24 @@ test('planExport marks presets that do not make the file smaller', () => {
   const source = { width: 1920, height: 1080, seconds: 60, bytes: 15e6, frameRate: 30, hasAudio: false };
   const results = Object.fromEntries(EXPORT_PRESETS.map((preset) => [preset.id, planExport(preset, source).smaller]));
   assert.deepEqual(results, { high: false, medium: true, small: true, tiny: true });
+});
+
+test('cameraBubbleRect puts the bubble in the chosen corner with a margin', () => {
+  // 1920 x 1080, medium: diameter 28% of 1080 = 302 (even), margin 3% = 32.
+  assert.deepEqual(cameraBubbleRect(1920, 1080, 'bottom-right', 'medium'), { x: 1920 - 32 - 302, y: 1080 - 32 - 302, diameter: 302 });
+  assert.deepEqual(cameraBubbleRect(1920, 1080, 'top-left', 'medium'), { x: 32, y: 32, diameter: 302 });
+  assert.deepEqual(cameraBubbleRect(1920, 1080, 'top-right', 'small'), { x: 1920 - 32 - 216, y: 32, diameter: 216 });
+  assert.deepEqual(cameraBubbleRect(1920, 1080, 'bottom-left', 'large'), { x: 32, y: 1080 - 32 - 388, diameter: 388 });
+  // Portrait: the shorter side is the width.
+  assert.equal(cameraBubbleRect(1080, 1920, 'bottom-right', 'medium').diameter, 302);
+  // Unknown values fall back to bottom right, medium.
+  assert.deepEqual(cameraBubbleRect(1920, 1080, 'nowhere', 'huge'), cameraBubbleRect(1920, 1080, 'bottom-right', 'medium'));
+  assert.equal(CAMERA_POSITIONS.length, 4);
+});
+
+test('settings defaults: camera off, review first, bottom-right medium bubble', () => {
+  assert.equal(SETTINGS_DEFAULTS.camera, false);
+  assert.equal(SETTINGS_DEFAULTS.afterRecording, 'review');
+  assert.equal(SETTINGS_DEFAULTS.cameraPosition, 'bottom-right');
+  assert.equal(SETTINGS_DEFAULTS.cameraSize, 'medium');
 });

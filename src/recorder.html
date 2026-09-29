@@ -76,7 +76,23 @@
 
     .result { display: none; }
     .result.active { display: block; }
-    .result video { width: 100%; max-height: 320px; border-radius: 10px; background: #000; margin-bottom: 8px; }
+    .stage { position: relative; width: 100%; margin: 0 auto 8px; border-radius: 10px; overflow: hidden; background: #000; }
+    .stage video.main { display: block; width: 100%; height: 100%; }
+    .bubble { position: absolute; display: none; aspect-ratio: 1; border-radius: 50%; object-fit: cover;
+              border: 2px solid rgba(255, 255, 255, 0.85); pointer-events: none; background: #222; }
+    .bubble.show { display: block; }
+    .camera-setup { display: none; align-items: center; gap: 14px; padding: 6px 0; }
+    .camera-setup.show { display: flex; }
+    .camera-preview { width: 120px; height: 120px; border-radius: 50%; object-fit: cover; background: #222; transform: scaleX(-1); flex: none; }
+    .camera-setup .row { flex: 1; grid-template-columns: 70px 1fr; }
+    .camera-live { display: none; width: 96px; height: 96px; border-radius: 50%; object-fit: cover; background: #222;
+                   transform: scaleX(-1); margin: 0 auto 10px; }
+    .camera-live.show { display: block; }
+    .camera-row { display: none; }
+    .camera-row.show { display: grid; }
+    .camera-row .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .footer-links { margin-top: 12px; text-align: center; font-size: 13px; }
+    .footer-links button { background: none; border: none; color: #4b3f9e; font: inherit; cursor: pointer; text-decoration: underline; }
     .details { color: #444; margin-bottom: 12px; }
 
     .presets { border: none; }
@@ -147,6 +163,14 @@
         </div>
         <label class="check"><input type="checkbox" id="micCheck"> Include microphone</label>
         <label class="check"><input type="checkbox" id="audioCheck"> Include system or tab audio <small>(if the browser supplies it)</small></label>
+        <label class="check"><input type="checkbox" id="cameraCheck"> Include camera <small id="cameraNote">(shows you in a corner of the video)</small></label>
+        <div class="camera-setup" id="cameraSetup">
+          <video class="camera-preview" id="cameraPreview" autoplay muted playsinline></video>
+          <div class="row" id="cameraDeviceRow">
+            <label for="cameraDevice">Camera</label>
+            <select id="cameraDevice"></select>
+          </div>
+        </div>
       </div>
       <button class="btn" id="startBtn">Start recording</button>
     </div>
@@ -154,6 +178,7 @@
     <div class="live" id="live">
       <div class="rec-indicator" id="recIndicator"><span class="rec-dot"></span><span id="recLabel">Recording</span></div>
       <div class="timer" id="timer">00:00</div>
+      <video class="camera-live" id="liveCamera" autoplay muted playsinline></video>
       <div class="live-size" id="liveSize">0 KB so far</div>
       <div class="btn-row">
         <button class="btn btn-secondary" id="pauseBtn">Pause</button>
@@ -162,8 +187,19 @@
     </div>
 
     <div class="result" id="result">
-      <video id="preview" controls></video>
+      <div class="stage" id="stage">
+        <video class="main" id="preview" controls></video>
+        <video class="bubble" id="previewCamera" muted playsinline></video>
+      </div>
       <p class="details" id="details"></p>
+
+      <div class="row camera-row" id="cameraRow">
+        <label for="cameraPositionSelect">Camera</label>
+        <div class="pair">
+          <select id="cameraPositionSelect"></select>
+          <select id="cameraSizeSelect"></select>
+        </div>
+      </div>
 
       <h2>Save as</h2>
       <fieldset class="presets" id="presets"></fieldset>
@@ -197,7 +233,9 @@
       <li>File size depends on quality and length. The size so far shows while you record.</li>
       <li>When you stop, you can save the recording as it is or a smaller copy.</li>
       <li>Firefox does not supply system or tab sound at this time. Use the microphone for narration.</li>
+      <li>With the camera on, you choose where your camera shows after you stop.</li>
     </ul>
+    <div class="footer-links"><button id="settingsLink">Settings</button></div>
   </div>
 
   <div class="countdown" id="countdown"></div>

@@ -9,9 +9,11 @@ const { skip, useBrowser } = require('./harness.js');
 
 const openPage = useBrowser();
 
-// An animated canvas stands in for the screen (size from window.__fakeScreen)
-// and an oscillator for the microphone. Every opened stream is kept in
-// window.__opened, so tests can check that all tracks stop.
+// An animated canvas stands in for the screen (size from window.__fakeScreen),
+// a green canvas for the webcam and an oscillator for the microphone. The
+// screen never shows pure green, so the camera bubble is easy to find in
+// saved frames. Every opened stream is kept in window.__opened, so tests can
+// check that all tracks stop.
 const fakeMedia = () => {
   window.__opened = [];
   navigator.mediaDevices.getDisplayMedia = async (constraints) => {
@@ -23,7 +25,7 @@ const fakeMedia = () => {
     const sctx = source.getContext('2d');
     let frame = 0;
     setInterval(() => {
-      sctx.fillStyle = `hsl(${(frame * 7) % 360}, 70%, 55%)`;
+      sctx.fillStyle = `hsl(${180 + ((frame * 7) % 180)}, 70%, 55%)`;
       sctx.fillRect(0, 0, width, height);
       sctx.fillStyle = '#000';
       sctx.font = `${Math.round(height / 12)}px sans-serif`;
@@ -34,7 +36,30 @@ const fakeMedia = () => {
     window.__opened.push(stream);
     return stream;
   };
-  navigator.mediaDevices.getUserMedia = async () => {
+  navigator.mediaDevices.enumerateDevices = async () => [
+    { kind: 'videoinput', deviceId: 'cam-front', label: 'Front camera' },
+    { kind: 'videoinput', deviceId: 'cam-usb', label: 'USB camera' },
+    { kind: 'audioinput', deviceId: 'mic', label: 'Microphone' }
+  ];
+  navigator.mediaDevices.getUserMedia = async (constraints) => {
+    window.__userMedia = (window.__userMedia || []).concat([constraints]);
+    if (constraints.video) {
+      if (window.__denyCamera) throw new DOMException('The user denied the camera.', 'NotAllowedError');
+      const camera = document.createElement('canvas');
+      camera.width = 640;
+      camera.height = 480;
+      const cctx = camera.getContext('2d');
+      let tick = 0;
+      setInterval(() => {
+        cctx.fillStyle = '#00ff00';
+        cctx.fillRect(0, 0, 640, 480);
+        cctx.fillStyle = '#00dd00';
+        cctx.fillRect((tick++ * 9) % 600, 20, 30, 30);
+      }, 33);
+      const stream = camera.captureStream(30);
+      window.__opened.push(stream);
+      return stream;
+    }
     const audio = new AudioContext();
     const oscillator = audio.createOscillator();
     const destination = audio.createMediaStreamDestination();
@@ -84,7 +109,7 @@ test('quality profile sets the screen size limit and the size estimate', { skip 
   assert.match(await page.textContent('#profileHint'), /^About 7\.5 MB per minute/);
   await page.check('#micCheck');
   assert.match(await page.textContent('#profileHint'), /^About 8\.0 MB per minute/);
-  assert.equal(await page.evaluate(() => window.__store.recorder.profile), 'medium');
+  assert.equal(await page.evaluate(() => window.__store['setting.profile']), 'medium');
 
   await page.click('#startBtn');
   await page.waitForFunction(() => document.getElementById('live').classList.contains('active'));
@@ -184,7 +209,7 @@ test('a smaller copy uses the preset size and is smaller than the recording', { 
   const saved = await probeDownload(page, 0);
   assert.deepEqual([saved.width, saved.height], [852, 480]);
   assert.ok(Number.isFinite(saved.duration), 'the copy has a duration');
-  assert.equal(await page.evaluate(() => window.__store.recorder.exportPreset), 'small');
+  assert.equal(await page.evaluate(() => window.__store['setting.exportPreset']), 'small');
   assert.deepEqual(errors, []);
   await context.close();
 });
@@ -231,20 +256,20 @@ test('without WebCodecs only "As recorded" is offered', { skip }, async () => {
 
 test('"Save at once" saves the recording as it is, then offers smaller copies', { skip }, async () => {
   const { page, context } = await openRecorder();
-  await page.evaluate(() => saveRecorderSettings({ afterRecording: 'save', exportPreset: 'medium' }));
+  await page.evaluate(() => saveSettings({ afterRecording: 'save', exportPreset: 'medium' }));
   await record(page, 1500);
   await page.waitForFunction(() => window.__calls.downloads.length === 1);
   await page.waitForFunction(() => document.getElementById('saved').classList.contains('show'));
   assert.match(await page.textContent('#message'), /saved as it is/);
   assert.match(await page.evaluate(() => window.__calls.downloads[0].filename), /^recording-[\d_-]+\.webm$/);
   // The automatic save does not change the remembered choice.
-  assert.equal(await page.evaluate(() => window.__store.recorder.exportPreset), 'medium');
+  assert.equal(await page.evaluate(() => window.__store['setting.exportPreset']), 'medium');
   await context.close();
 });
 
 test('a pending save never shows the previous file', { skip }, async () => {
   const { page, context } = await openRecorder();
-  await page.evaluate(() => saveRecorderSettings({ afterRecording: 'save' }));
+  await page.evaluate(() => saveSettings({ afterRecording: 'save' }));
   await record(page, 1200);
   await page.waitForFunction(() => lastDownloadId === 1 && document.getElementById('saved').classList.contains('show'));
 
@@ -286,17 +311,110 @@ test('countdown can be cancelled by ending the share', { skip }, async () => {
   await context.close();
 });
 
-test('options page sets the default recording quality and the after-recording step', { skip }, async () => {
-  const { page, context, errors } = await openPage('options.html');
-  await page.waitForFunction(() => document.getElementById('recordingProfile').options.length === 5);
-  assert.equal(await page.inputValue('#recordingProfile'), 'high');
-  assert.equal(await page.inputValue('#afterRecording'), 'review');
-  const label = await page.$eval('#recordingProfile option[value="high"]', (option) => option.textContent);
-  assert.equal(label, 'High: up to 1920 × 1080, 30 fps (about 15 MB per minute)');
-  await page.selectOption('#recordingProfile', 'small');
-  await page.selectOption('#afterRecording', 'save');
-  await page.waitForFunction(() => window.__store.recorder && window.__store.recorder.afterRecording === 'save');
-  assert.equal(await page.evaluate(() => window.__store.recorder.profile), 'small');
+// Read one pixel of a saved video at a time (seconds), as a player shows it.
+function pixelAt(page, index, time, x, y) {
+  return page.evaluate(([i, t, px, py]) => new Promise((resolve, reject) => {
+    const video = document.createElement('video');
+    video.muted = true;
+    video.onerror = () => reject(new Error(String(video.error && video.error.message)));
+    video.onloadedmetadata = () => { video.currentTime = t; };
+    video.onseeked = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(video, 0, 0);
+      resolve(Array.from(ctx.getImageData(px, py, 1, 1).data.slice(0, 3)));
+    };
+    video.src = URL.createObjectURL(window.__downloadBlobs[i]);
+  }), [index, time, x, y]);
+}
+
+const isGreen = ([r, g, b]) => g > 180 && r < 90 && b < 90;
+
+test('camera: preview, device list, and the camera stops with the recording', { skip }, async () => {
+  const { page, context, errors } = await openRecorder();
+  assert.equal(await page.isVisible('#cameraSetup'), false);
+  await page.check('#cameraCheck');
+  await page.waitForFunction(() => document.getElementById('cameraSetup').classList.contains('show'));
+  assert.equal(await page.evaluate(() => window.__store['setting.camera']), true);
+  assert.deepEqual(await page.$$eval('#cameraDevice option', (options) => options.map((option) => option.textContent)),
+    ['Front camera', 'USB camera']);
+  assert.equal(await page.isVisible('#cameraDeviceRow'), true);
+
+  await page.selectOption('#cameraDevice', 'cam-usb');
+  await page.waitForFunction(() => window.__store['setting.cameraDeviceId'] === 'cam-usb');
+  const lastCamera = await page.evaluate(() => window.__userMedia.filter((c) => c.video).at(-1).video.deviceId);
+  assert.deepEqual(lastCamera, { exact: 'cam-usb' });
+
+  await page.click('#startBtn');
+  await page.waitForFunction(() => document.getElementById('live').classList.contains('active'));
+  assert.equal(await page.isVisible('#liveCamera'), true, 'you see yourself while recording');
+  await page.waitForTimeout(1200);
+  await page.click('#stopBtn');
+  await page.waitForFunction(() => document.getElementById('result').classList.contains('active') &&
+    !document.getElementById('exportNote').textContent.startsWith('Checking'));
+  assert.equal(await liveTrackCount(page), 0, 'screen and camera tracks are stopped');
+  assert.match(await page.textContent('#details'), / · with camera$/);
+  assert.equal(await page.isVisible('#cameraRow'), true);
+  assert.equal(await page.isVisible('#previewCamera'), true);
   assert.deepEqual(errors, []);
+  await context.close();
+});
+
+test('camera: the saved video has the bubble in the chosen corner', { skip }, async () => {
+  const { page, context, errors } = await openRecorder(() => { window.__fakeScreen = { width: 640, height: 360 }; });
+  await page.check('#cameraCheck');
+  await page.waitForFunction(() => document.getElementById('cameraSetup').classList.contains('show'));
+  await record(page, 2500);
+
+  const first = await page.$eval('#presets .preset', (label) => label.textContent);
+  assert.match(first, /^Full size · 640 × 360, 30 fps.*about [\d.]+ (KB|MB)$/);
+  await page.check('#presets input[value="original"]');
+  await page.click('#saveBtn');
+  await page.waitForFunction(() => window.__calls.downloads.length === 1, null, { timeout: 60000 });
+  assert.match(await page.evaluate(() => window.__calls.downloads[0].filename), /^recording-[\d_-]+\.webm$/);
+
+  // Bottom right, medium: diameter 100, margin 11 (see cameraBubbleRect).
+  const box = await page.evaluate(() => cameraBubbleRect(640, 360, 'bottom-right', 'medium'));
+  const center = [box.x + box.diameter / 2, box.y + box.diameter / 2];
+  assert.ok(isGreen(await pixelAt(page, 0, 1, ...center)), 'camera in the bottom-right corner');
+  assert.ok(!isGreen(await pixelAt(page, 0, 1, 40, 40)), 'screen in the top-left corner');
+
+  // Move the bubble to the top left and save again.
+  await page.selectOption('#cameraPositionSelect', 'top-left');
+  assert.equal(await page.evaluate(() => window.__store['setting.cameraPosition']), 'top-left');
+  await page.click('#saveBtn');
+  await page.waitForFunction(() => window.__calls.downloads.length === 2, null, { timeout: 60000 });
+  const topLeft = await page.evaluate(() => cameraBubbleRect(640, 360, 'top-left', 'medium'));
+  assert.ok(isGreen(await pixelAt(page, 1, 1, topLeft.x + topLeft.diameter / 2, topLeft.y + topLeft.diameter / 2)));
+  assert.ok(!isGreen(await pixelAt(page, 1, 1, ...center)), 'the bottom-right corner shows the screen now');
+
+  // "Hide camera": back to "As recorded", no bubble.
+  await page.selectOption('#cameraPositionSelect', 'hidden');
+  assert.match(await page.$eval('#presets .preset', (label) => label.textContent), /^As recorded/);
+  await page.click('#saveBtn');
+  await page.waitForFunction(() => window.__calls.downloads.length === 3, null, { timeout: 60000 });
+  assert.ok(!isGreen(await pixelAt(page, 2, 1, ...center)));
+  assert.equal(await page.evaluate(() => window.__store['setting.cameraPosition']), 'top-left', '"Hide" is not saved as the default');
+  assert.deepEqual(errors, []);
+  await context.close();
+});
+
+test('camera: a denied camera unticks the option and says why', { skip }, async () => {
+  const { page, context } = await openRecorder(() => { window.__denyCamera = true; });
+  // click(), not check(): the box unticks itself when the camera is denied.
+  await page.click('#cameraCheck');
+  await page.waitForFunction(() => document.getElementById('message').classList.contains('show'));
+  assert.equal(await page.isChecked('#cameraCheck'), false);
+  assert.match(await page.textContent('#message'), /did not allow the camera/);
+  assert.equal(await page.evaluate(() => window.__store['setting.camera']), false);
+  await context.close();
+});
+
+test('camera: needs WebCodecs', { skip }, async () => {
+  const { page, context } = await openRecorder(() => { delete window.VideoEncoder; });
+  assert.equal(await page.isDisabled('#cameraCheck'), true);
+  assert.equal(await page.textContent('#cameraNote'), '(needs Firefox 130 or later)');
   await context.close();
 });

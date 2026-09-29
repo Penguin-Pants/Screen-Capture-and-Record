@@ -1,5 +1,7 @@
 # ScreenCapture Pro 1.0.1: Reverse-Engineering Report
 
+> **Note:** this report describes the original extension. Since then, this repository became a video-only recorder. The screenshot features (visible area, selected area, full page) and the image editor were removed; screenshots are the job of the companion extension [FullShot](https://github.com/Penguin-Pants/FullShot). Rows about screenshots and the editor in [Status in 2.0.0](#status-in-200) describe fixes made before that change.
+
 ## Summary
 
 - The XPI contains plain, unminified JavaScript. No bundler, transpiler or obfuscation is present. The files in `src/` are the original files, byte for byte.

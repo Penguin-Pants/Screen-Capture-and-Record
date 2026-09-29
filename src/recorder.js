@@ -1,5 +1,6 @@
-// Screen recorder page. Records with a quality profile, shows the file size
-// while recording, then shows the video with size options before saving.
+// Screen recorder page. Records the screen (and the webcam, if chosen) with
+// a quality profile, shows the file size while recording, then shows the
+// video with size options before saving.
 'use strict';
 
 // MediaRecorder types, best first. VP9 makes smaller files than VP8 at the
@@ -21,16 +22,28 @@ const ui = {
   countdownSelect: $('countdownSelect'),
   mic: $('micCheck'),
   audio: $('audioCheck'),
+  camera: $('cameraCheck'),
+  cameraNote: $('cameraNote'),
+  cameraSetup: $('cameraSetup'),
+  cameraPreview: $('cameraPreview'),
+  cameraDevice: $('cameraDevice'),
+  cameraDeviceRow: $('cameraDeviceRow'),
   start: $('startBtn'),
   pause: $('pauseBtn'),
   stop: $('stopBtn'),
   timer: $('timer'),
   liveSize: $('liveSize'),
+  liveCamera: $('liveCamera'),
   recIndicator: $('recIndicator'),
   recLabel: $('recLabel'),
   countdown: $('countdown'),
+  stage: $('stage'),
   preview: $('preview'),
+  previewCamera: $('previewCamera'),
   details: $('details'),
+  cameraRow: $('cameraRow'),
+  cameraPosition: $('cameraPositionSelect'),
+  cameraSize: $('cameraSizeSelect'),
   presets: $('presets'),
   exportNote: $('exportNote'),
   format: $('formatSelect'),
@@ -42,28 +55,33 @@ const ui = {
   savedText: $('savedText'),
   showFile: $('showFileBtn'),
   save: $('saveBtn'),
-  again: $('againBtn')
+  again: $('againBtn'),
+  settingsLink: $('settingsLink')
 };
 
 // Recording session state.
-let mediaRecorder = null;
+let mediaRecorder = null;   // The screen recorder
+let cameraRecorder = null;  // The webcam recorder, when the camera is on
 let chunks = [];
+let cameraChunks = [];
 let recordedBytes = 0;
-let sourceStreams = [];   // Every stream we opened. All tracks stop at the end.
+let sourceStreams = [];     // Screen and microphone streams. All tracks stop at the end.
+let cameraStream = null;    // The webcam stream: preview before and during recording
 let audioContext = null;
-let activeMs = 0;         // Recorded time before the last resume
+let activeMs = 0;           // Recorded time before the last resume
 let resumedAt = 0;
 let timerInterval = null;
 let cancelCountdown = null;
-let session = null;       // { profile, hasAudio, startedAt, captureSize }
+let session = null;         // { profile, hasAudio, startedAt, captureSize }
 
 // Review state. recording: { blob, mimeType, seconds, width, height,
-// frameRate, hasAudio, baseName, saved }
+// frameRate, videoBitsPerSecond, hasAudio, camera, baseName, saved }
 let recording = null;
 let previewUrl = null;
+let previewCameraUrl = null;
 let lastDownloadId = null;
-let exportSupport = null; // null while checking, then { library, formats }
-let conversion = null;    // The running Mediabunny conversion, for Cancel
+let exportSupport = null;   // null while checking, then { library, formats }
+let conversion = null;      // The running Mediabunny conversion, for Cancel
 let cancelRequested = false;
 let mediabunnyPromise = null;
 
@@ -86,6 +104,14 @@ function reportState(state) {
   browser.runtime.sendMessage({ action: 'recordingState', state }).catch(() => {});
 }
 
+// The background page calls this when the toolbar button is clicked and
+// this recorder tab is already open.
+window.focusRecorder = async () => {
+  const tab = await browser.tabs.getCurrent();
+  await browser.tabs.update(tab.id, { active: true });
+  await browser.windows.update(tab.windowId, { focused: true });
+};
+
 // ---------------------------------------------------------------- Setup
 
 function profileLabel(profile) {
@@ -107,19 +133,35 @@ function updateProfileHint() {
     `About ${formatBytes(bytesPerMinute(profile, audio))} per minute. Often less when little moves on the screen.`;
 }
 
+// The camera bubble is drawn when you save, with the WebCodecs API.
+function cameraSupported() {
+  return typeof VideoEncoder === 'function' && Boolean(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+}
+
 async function initOptions() {
   for (const profile of RECORDING_PROFILES) {
     ui.profile.add(new Option(profileLabel(profile), profile.id));
   }
+  for (const position of CAMERA_POSITIONS) ui.cameraPosition.add(new Option(position.label, position.id));
+  ui.cameraPosition.add(new Option('Hide camera', 'hidden'));
+  for (const size of CAMERA_SIZES) ui.cameraSize.add(new Option(`${size.label} size`, size.id));
 
-  const saved = await getRecorderSettings();
-  ui.profile.value = getRecordingProfile(saved.profile).id;
-  ui.countdownSelect.value = String(saved.countdown);
-  ui.mic.checked = saved.microphone;
-  ui.audio.checked = saved.systemAudio;
+  const settings = await getSettings();
+  ui.profile.value = getRecordingProfile(settings.profile).id;
+  ui.countdownSelect.value = String(settings.countdown);
+  ui.mic.checked = settings.microphone;
+  ui.audio.checked = settings.systemAudio;
   updateProfileHint();
 
-  const persist = () => saveRecorderSettings({
+  if (!cameraSupported()) {
+    ui.camera.disabled = true;
+    ui.cameraNote.textContent = '(needs Firefox 130 or later)';
+  } else if (settings.camera) {
+    ui.camera.checked = true;
+    await startCameraPreview(settings.cameraDeviceId);
+  }
+
+  const persist = () => saveSettings({
     profile: ui.profile.value,
     countdown: Number(ui.countdownSelect.value),
     microphone: ui.mic.checked,
@@ -129,6 +171,73 @@ async function initOptions() {
     updateProfileHint();
     persist();
   }));
+
+  ui.camera.addEventListener('change', async () => {
+    saveSettings({ camera: ui.camera.checked });
+    if (ui.camera.checked) {
+      await startCameraPreview((await getSettings()).cameraDeviceId);
+    } else {
+      stopCamera();
+    }
+  });
+  ui.cameraDevice.addEventListener('change', async () => {
+    saveSettings({ cameraDeviceId: ui.cameraDevice.value });
+    await startCameraPreview(ui.cameraDevice.value);
+  });
+}
+
+// Open the webcam for the preview. The same stream is recorded later, so
+// Firefox asks for permission only once.
+async function startCameraPreview(deviceId) {
+  stopCamera();
+  const video = { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } };
+  try {
+    try {
+      cameraStream = await navigator.mediaDevices.getUserMedia({
+        video: deviceId ? { ...video, deviceId: { exact: deviceId } } : video,
+        audio: false
+      });
+    } catch (error) {
+      if (!deviceId || error.name !== 'OverconstrainedError') throw error;
+      // The saved camera is gone. Use the default camera.
+      cameraStream = await navigator.mediaDevices.getUserMedia({ video, audio: false });
+    }
+  } catch (error) {
+    ui.camera.checked = false;
+    saveSettings({ camera: false });
+    updateCameraSetup();
+    showMessage(error.name === 'NotAllowedError'
+      ? 'Firefox did not allow the camera. To use it, allow the camera when Firefox asks.'
+      : `The camera is not available (${error.message}).`, 'error');
+    return;
+  }
+  ui.cameraPreview.srcObject = cameraStream;
+  updateCameraSetup();
+  await fillCameraDevices();
+}
+
+function stopCamera() {
+  if (cameraStream) cameraStream.getTracks().forEach((track) => track.stop());
+  cameraStream = null;
+  ui.cameraPreview.srcObject = null;
+  ui.liveCamera.srcObject = null;
+  ui.liveCamera.classList.remove('show');
+  updateCameraSetup();
+}
+
+function updateCameraSetup() {
+  ui.cameraSetup.classList.toggle('show', Boolean(ui.camera.checked && cameraStream));
+}
+
+// Camera names show only after permission is given. The list shows only
+// when there is more than one camera.
+async function fillCameraDevices() {
+  const devices = (await navigator.mediaDevices.enumerateDevices()).filter((device) => device.kind === 'videoinput');
+  ui.cameraDevice.replaceChildren(...devices.map((device, index) => new Option(device.label || `Camera ${index + 1}`, device.deviceId)));
+  const track = cameraStream && cameraStream.getVideoTracks()[0];
+  const current = track && track.getSettings().deviceId;
+  if (current && devices.some((device) => device.deviceId === current)) ui.cameraDevice.value = current;
+  ui.cameraDeviceRow.style.display = devices.length > 1 ? '' : 'none';
 }
 
 function chooseMimeType(hasAudio) {
@@ -219,9 +328,15 @@ function displayConstraints(profile) {
   return video;
 }
 
+// Resolves when a started recorder has stopped.
+function whenStopped(recorder) {
+  return new Promise((resolve) => {
+    if (!recorder || recorder.state === 'inactive') resolve();
+    else recorder.addEventListener('stop', resolve, { once: true });
+  });
+}
+
 async function startRecording() {
-  if (recording && !recording.saved && !confirmDiscard()) return;
-  clearReview();
   clearMessage();
   ui.start.disabled = true;
   try {
@@ -243,9 +358,12 @@ async function startRecording() {
     if (mimeType) options.mimeType = mimeType;
     if (hasAudio) options.audioBitsPerSecond = audioBits;
 
+    if (ui.camera.checked && !cameraStream) await startCameraPreview((await getSettings()).cameraDeviceId);
+    const withCamera = Boolean(ui.camera.checked && cameraStream);
+
     const countdownDone = await runCountdown(Number(ui.countdownSelect.value));
     if (!countdownDone || videoTrack.readyState === 'ended') {
-      releaseStreams();
+      releaseStreams({ keepCamera: true });
       setView('setup');
       return;
     }
@@ -258,6 +376,7 @@ async function startRecording() {
       captureSize: { width: settings.width || 0, height: settings.height || 0 }
     };
     chunks = [];
+    cameraChunks = [];
     recordedBytes = 0;
     mediaRecorder = new MediaRecorder(stream, options);
     mediaRecorder.ondataavailable = (event) => {
@@ -267,12 +386,31 @@ async function startRecording() {
         updateLiveSize();
       }
     };
-    mediaRecorder.onstop = finishRecording;
     mediaRecorder.onerror = (event) => {
       showMessage(`Recording error: ${(event.error && event.error.message) || 'unknown error'}`, 'error');
       stopRecording();
     };
+
+    cameraRecorder = null;
+    if (withCamera) {
+      // The webcam records to its own file, without sound (the microphone
+      // is in the screen file). The bubble is drawn when you save.
+      const cameraType = chooseMimeType(false);
+      cameraRecorder = new MediaRecorder(cameraStream, {
+        videoBitsPerSecond: CAMERA_BITS_PER_SECOND,
+        ...(cameraType ? { mimeType: cameraType } : {})
+      });
+      cameraRecorder.ondataavailable = (event) => {
+        if (event.data && event.data.size > 0) cameraChunks.push(event.data);
+      };
+      cameraRecorder.onerror = () => showMessage('The camera stopped. The rest of the video has no camera.', 'error');
+      ui.liveCamera.srcObject = cameraStream;
+      ui.liveCamera.classList.add('show');
+    }
+
     mediaRecorder.start(1000);
+    if (cameraRecorder) cameraRecorder.start(1000);
+    Promise.all([whenStopped(mediaRecorder), whenStopped(cameraRecorder)]).then(finishRecording);
 
     activeMs = 0;
     resumedAt = Date.now();
@@ -282,7 +420,7 @@ async function startRecording() {
     setView('live');
     reportState('recording');
   } catch (error) {
-    releaseStreams();
+    releaseStreams({ keepCamera: true });
     setView('setup');
     if (error.name !== 'NotAllowedError' && error.name !== 'AbortError') {
       showMessage(`Could not start recording: ${error.message}`, 'error');
@@ -294,13 +432,14 @@ async function startRecording() {
 
 function togglePause() {
   if (!mediaRecorder) return;
+  const recorders = [mediaRecorder, cameraRecorder].filter(Boolean);
   if (mediaRecorder.state === 'recording') {
-    mediaRecorder.pause();
+    recorders.forEach((recorder) => recorder.state === 'recording' && recorder.pause());
     activeMs += Date.now() - resumedAt;
     setPausedUi(true);
     reportState('paused');
   } else if (mediaRecorder.state === 'paused') {
-    mediaRecorder.resume();
+    recorders.forEach((recorder) => recorder.state === 'paused' && recorder.resume());
     resumedAt = Date.now();
     setPausedUi(false);
     reportState('recording');
@@ -318,22 +457,24 @@ function stopRecording() {
   if (cancelCountdown) cancelCountdown();
   if (mediaRecorder && mediaRecorder.state !== 'inactive') {
     if (mediaRecorder.state === 'recording') activeMs += Date.now() - resumedAt;
-    mediaRecorder.stop(); // onstop opens the review.
+    mediaRecorder.stop(); // When both recorders stop, the review opens.
   }
+  if (cameraRecorder && cameraRecorder.state !== 'inactive') cameraRecorder.stop();
   releaseStreams();
   clearInterval(timerInterval);
   reportState('idle');
 }
 
-// Stop every track of every stream we opened (screen, microphone) and
-// close the audio mixer, so no capture indicator stays on.
-function releaseStreams() {
+// Stop every track of every stream we opened (screen, microphone, camera)
+// and close the audio mixer, so no capture indicator stays on.
+function releaseStreams({ keepCamera = false } = {}) {
   for (const stream of sourceStreams) {
     stream.getTracks().forEach((track) => track.stop());
   }
   sourceStreams = [];
   if (audioContext && audioContext.state !== 'closed') audioContext.close();
   audioContext = null;
+  if (!keepCamera) stopCamera();
 }
 
 function activeSeconds() {
@@ -378,19 +519,27 @@ function waitForVideoSize(video, fallback) {
 async function finishRecording() {
   const recorder = mediaRecorder;
   mediaRecorder = null;
+  cameraRecorder = null;
   if (chunks.length === 0) {
     setView('setup');
     showMessage('The recording is empty. Nothing was saved.', 'error');
+    if (ui.camera.checked) startCameraPreview((await getSettings()).cameraDeviceId);
     return;
   }
 
   const mimeType = (recorder && recorder.mimeType) || 'video/webm';
   const blob = new Blob(chunks, { type: mimeType.split(';')[0] });
+  const cameraBlob = cameraChunks.length > 0 ? new Blob(cameraChunks, { type: 'video/webm' }) : null;
   chunks = [];
+  cameraChunks = [];
 
   if (previewUrl) URL.revokeObjectURL(previewUrl);
   previewUrl = URL.createObjectURL(blob);
   ui.preview.src = previewUrl;
+  if (previewCameraUrl) URL.revokeObjectURL(previewCameraUrl);
+  previewCameraUrl = cameraBlob ? URL.createObjectURL(cameraBlob) : null;
+  if (previewCameraUrl) ui.previewCamera.src = previewCameraUrl;
+  else ui.previewCamera.removeAttribute('src');
   lastDownloadId = null;
   ui.saved.classList.remove('show');
   exportSupport = null;
@@ -403,11 +552,17 @@ async function finishRecording() {
     width: size.width,
     height: size.height,
     frameRate: session.profile.frameRate,
+    videoBitsPerSecond: session.profile.videoBitsPerSecond,
     hasAudio: session.hasAudio,
+    camera: cameraBlob ? { blob: cameraBlob } : null,
     baseName: `recording-${fileTimestamp(session.startedAt)}`,
     saved: false
   };
-  const settings = await getRecorderSettings();
+  const settings = await getSettings();
+  ui.cameraPosition.value = settings.cameraPosition;
+  if (!ui.cameraPosition.value) ui.cameraPosition.value = CAMERA_POSITIONS[0].id;
+  ui.cameraSize.value = settings.cameraSize;
+  if (!ui.cameraSize.value) ui.cameraSize.value = 'medium';
   renderReview(settings);
   setView('result');
 
@@ -419,7 +574,9 @@ async function finishRecording() {
   if (settings.afterRecording === 'save') {
     await saveRecording('original');
     if (recording === current && current.saved) {
-      showMessage('The recording was saved as it is. You can also save a smaller copy below.', 'info');
+      showMessage(cameraOn()
+        ? 'The recording was saved with your camera. You can also save a smaller copy below.'
+        : 'The recording was saved as it is. You can also save a smaller copy below.', 'info');
     }
   }
 }
@@ -437,8 +594,8 @@ function loadMediabunny() {
   return mediabunnyPromise;
 }
 
-// Which output formats this browser can encode. Smaller copies need the
-// WebCodecs API (Firefox 130 or later).
+// Which output formats this browser can encode. Smaller copies and the
+// camera bubble need the WebCodecs API (Firefox 130 or later).
 async function detectExportSupport(rec) {
   let mb;
   try {
@@ -471,6 +628,15 @@ async function detectExportSupport(rec) {
   return { library: true, formats };
 }
 
+function canTranscode() {
+  return Boolean(exportSupport && exportSupport.formats.length > 0 && recording.width);
+}
+
+// The camera bubble goes into the saved video.
+function cameraOn() {
+  return Boolean(recording && recording.camera && ui.cameraPosition.value !== 'hidden' && canTranscode());
+}
+
 function sourceInfo() {
   return {
     width: recording.width,
@@ -484,14 +650,34 @@ function sourceInfo() {
 
 // All choices for "Save as", with their estimated sizes.
 function exportChoices() {
-  const canTranscode = Boolean(exportSupport && exportSupport.formats.length > 0 && recording.width);
-  const choices = [{
-    id: 'original',
-    name: 'As recorded',
-    spec: recording.width ? `${recording.width} × ${recording.height}, no quality loss` : 'No quality loss',
-    size: formatBytes(recording.blob.size),
-    enabled: true
-  }];
+  const transcode = canTranscode();
+  let original;
+  if (cameraOn()) {
+    // The bubble needs a new encode, at the quality of the recording.
+    const plan = planExport({
+      maxWidth: null,
+      maxHeight: null,
+      frameRate: recording.frameRate,
+      videoBitsPerSecond: recording.videoBitsPerSecond
+    }, sourceInfo());
+    original = {
+      id: 'original',
+      name: 'Full size',
+      spec: `${plan.width} × ${plan.height}, ${plan.frameRate} fps`,
+      size: `about ${formatBytes(plan.bytes)}`,
+      enabled: transcode,
+      plan
+    };
+  } else {
+    original = {
+      id: 'original',
+      name: 'As recorded',
+      spec: recording.width ? `${recording.width} × ${recording.height}, no quality loss` : 'No quality loss',
+      size: formatBytes(recording.blob.size),
+      enabled: true
+    };
+  }
+  const choices = [original];
   for (const preset of EXPORT_PRESETS) {
     const plan = recording.width ? planExport(preset, sourceInfo()) : null;
     let spec = plan ? `${plan.width} × ${plan.height}, ${plan.frameRate} fps` : '';
@@ -501,7 +687,7 @@ function exportChoices() {
       name: preset.label,
       spec,
       size: plan ? `about ${formatBytes(plan.bytes)}` : '',
-      enabled: canTranscode && Boolean(plan) && plan.smaller,
+      enabled: transcode && Boolean(plan) && plan.smaller,
       plan
     });
   }
@@ -518,7 +704,11 @@ function renderReview(settings) {
   const parts = [`Length ${formatDuration(rec.seconds)}`];
   if (rec.width) parts.push(`${rec.width} × ${rec.height}`);
   parts.push(formatBytes(rec.blob.size));
+  if (rec.camera) parts.push('with camera');
   ui.details.textContent = parts.join(' · ');
+
+  ui.cameraRow.classList.toggle('show', Boolean(rec.camera));
+  renderStage();
 
   const choices = exportChoices();
   const current = ui.presets.querySelector('input:checked') ? selectedChoiceId() : settings.exportPreset;
@@ -553,7 +743,9 @@ function renderReview(settings) {
   } else if (!exportSupport.library) {
     ui.exportNote.textContent = 'The export tool could not load. You can save the recording as it is.';
   } else if (exportSupport.formats.length === 0) {
-    ui.exportNote.textContent = 'Smaller copies need Firefox 130 or later. You can save the recording as it is.';
+    ui.exportNote.textContent = rec.camera
+      ? 'Adding the camera and smaller copies need Firefox 130 or later. You can save the screen recording as it is.'
+      : 'Smaller copies need Firefox 130 or later. You can save the recording as it is.';
   } else {
     ui.exportNote.textContent = 'Sizes are estimates. Screens with little motion often make smaller files.';
   }
@@ -561,9 +753,28 @@ function renderReview(settings) {
   renderFormats(settings);
 }
 
+// Preview: the screen video, with the camera video on top where the
+// bubble will be. The stage has the aspect ratio of the recording.
+function renderStage() {
+  const rec = recording;
+  if (rec.width && rec.height) {
+    ui.stage.style.aspectRatio = `${rec.width} / ${rec.height}`;
+    ui.stage.style.maxWidth = `${Math.round((360 * rec.width) / rec.height)}px`;
+  }
+  const show = Boolean(rec.camera && rec.width && ui.cameraPosition.value !== 'hidden');
+  ui.previewCamera.classList.toggle('show', show);
+  if (!show) return;
+  const box = cameraBubbleRect(rec.width, rec.height, ui.cameraPosition.value, ui.cameraSize.value);
+  Object.assign(ui.previewCamera.style, {
+    left: `${(box.x / rec.width) * 100}%`,
+    top: `${(box.y / rec.height) * 100}%`,
+    width: `${(box.diameter / rec.width) * 100}%`
+  });
+}
+
 function renderFormats(settings) {
-  const original = selectedChoiceId() === 'original';
-  const formats = original || !exportSupport ? [] : exportSupport.formats;
+  const asRecorded = selectedChoiceId() === 'original' && !cameraOn();
+  const formats = asRecorded || !exportSupport ? [] : exportSupport.formats;
   const previous = ui.format.value && ui.format.value !== 'original' ? ui.format.value : settings.exportFormat;
   ui.format.replaceChildren();
   if (formats.length === 0) {
@@ -580,8 +791,10 @@ function renderFormats(settings) {
 function setBusy(busy) {
   ui.save.disabled = busy;
   ui.again.disabled = busy;
-  ui.format.disabled = busy || selectedChoiceId() === 'original';
+  ui.format.disabled = busy || ui.format.value === 'original';
   ui.presets.disabled = busy;
+  ui.cameraPosition.disabled = busy;
+  ui.cameraSize.disabled = busy;
   ui.progress.classList.toggle('active', busy);
   if (busy) {
     cancelRequested = false;
@@ -595,11 +808,91 @@ function updateProgress(progress) {
   ui.progressText.textContent = `Making the file... ${percent}%`;
 }
 
+function cancelledError() {
+  return Object.assign(new Error('Conversion has been canceled.'), { name: 'ConversionCanceledError' });
+}
+
+// Draw the camera frame as a circle with a light ring.
+function drawCameraBubble(ctx, source, box) {
+  const radius = box.diameter / 2;
+  const cx = box.x + radius;
+  const cy = box.y + radius;
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+  ctx.closePath();
+  ctx.clip();
+  ctx.drawImage(source, box.x, box.y, box.diameter, box.diameter);
+  ctx.restore();
+  const ring = Math.max(2, Math.round(box.diameter * 0.02));
+  ctx.save();
+  ctx.lineWidth = ring;
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.85)';
+  ctx.beginPath();
+  ctx.arc(cx, cy, radius - ring / 2, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+}
+
+// Frame-by-frame drawing of the camera bubble onto the screen video. The
+// camera frames come in time order and follow the screen frames' times.
+async function createCameraOverlay(mb, width, height) {
+  const box = cameraBubbleRect(width, height, ui.cameraPosition.value, ui.cameraSize.value);
+  const input = new mb.Input({ formats: mb.ALL_FORMATS, source: new mb.BlobSource(recording.camera.blob) });
+  const track = await input.getPrimaryVideoTrack();
+  if (!track) {
+    input.dispose();
+    return null;
+  }
+  const sink = new mb.CanvasSink(track, { width: box.diameter, height: box.diameter, fit: 'cover' });
+  const frames = sink.canvases(0);
+  let current = null;
+  let next = (await frames.next()).value || null;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+
+  return {
+    process: async (sample) => {
+      const time = sample.timestamp;
+      while (next && next.timestamp <= time) {
+        current = next;
+        const step = await frames.next();
+        next = step.done ? null : step.value;
+      }
+      // Before the first camera frame, show it early. After the camera
+      // stopped (for example, unplugged), show no bubble.
+      const frame = current || next;
+      const cameraEnded = !next && current && time > current.timestamp + current.duration + 0.5;
+      sample.draw(ctx, 0, 0, width, height);
+      if (frame && !cameraEnded) drawCameraBubble(ctx, frame.canvas, box);
+      return new mb.VideoSample(canvas, { timestamp: sample.timestamp, duration: sample.duration });
+    },
+    dispose: async () => {
+      await frames.return();
+      input.dispose();
+    }
+  };
+}
+
 // Run one Mediabunny conversion of the recording to a new Blob.
-async function convertRecording(trackOptions, container) {
+// withCamera: draw the camera bubble (needs trackOptions.video with a size).
+async function convertRecording(trackOptions, container, withCamera = false) {
   const mb = await loadMediabunny();
   const input = new mb.Input({ formats: mb.ALL_FORMATS, source: new mb.BlobSource(recording.blob) });
+  let overlay = null;
   try {
+    if (withCamera) {
+      const { width, height } = trackOptions.video;
+      overlay = await createCameraOverlay(mb, width, height);
+      if (overlay) {
+        trackOptions.video.process = overlay.process;
+        trackOptions.video.processedWidth = width;
+        trackOptions.video.processedHeight = height;
+      }
+    }
     const format = container === 'mp4'
       ? new mb.Mp4OutputFormat({ fastStart: 'in-memory' })
       : new mb.WebMOutputFormat();
@@ -608,7 +901,7 @@ async function convertRecording(trackOptions, container) {
     // Cancel can come before the conversion exists.
     if (cancelRequested) {
       await conversion.cancel();
-      throw Object.assign(new Error('Conversion has been canceled.'), { name: 'ConversionCanceledError' });
+      throw cancelledError();
     }
     if (!conversion.isValid) {
       const reasons = conversion.discardedTracks.map((track) => track.reason).join(', ');
@@ -616,11 +909,10 @@ async function convertRecording(trackOptions, container) {
     }
     conversion.onProgress = updateProgress;
     await conversion.execute();
-    if (cancelRequested) {
-      throw Object.assign(new Error('Conversion has been canceled.'), { name: 'ConversionCanceledError' });
-    }
+    if (cancelRequested) throw cancelledError();
     return new Blob([output.target.buffer], { type: container === 'mp4' ? 'video/mp4' : 'video/webm' });
   } finally {
+    if (overlay) await overlay.dispose();
     input.dispose();
   }
 }
@@ -653,7 +945,7 @@ async function saveRecording(choiceId = selectedChoiceId()) {
   try {
     let blob;
     let suffix = '';
-    if (choice.id === 'original') {
+    if (!choice.plan) {
       blob = await remuxRecording();
     } else {
       const format = exportSupport.formats.find((item) => item.id === ui.format.value) || exportSupport.formats[0];
@@ -674,8 +966,8 @@ async function saveRecording(choiceId = selectedChoiceId()) {
       if (rec.hasAudio) {
         trackOptions.audio = { codec: format.audioCodec, bitrate: plan.audioBitsPerSecond, forceTranscode: true };
       }
-      blob = await convertRecording(trackOptions, format.container);
-      suffix = `-${plan.height}p`;
+      blob = await convertRecording(trackOptions, format.container, cameraOn());
+      if (choice.id !== 'original') suffix = `-${plan.height}p`;
     }
     // The file is ready. The download step cannot be cancelled.
     conversion = null;
@@ -716,10 +1008,23 @@ function clearReview() {
   lastDownloadId = null;
   ui.saved.classList.remove('show');
   ui.presets.replaceChildren();
-  ui.preview.removeAttribute('src');
-  ui.preview.load();
+  for (const video of [ui.preview, ui.previewCamera]) {
+    video.pause();
+    video.removeAttribute('src');
+    video.load();
+  }
+  ui.previewCamera.classList.remove('show');
   if (previewUrl) URL.revokeObjectURL(previewUrl);
+  if (previewCameraUrl) URL.revokeObjectURL(previewCameraUrl);
   previewUrl = null;
+  previewCameraUrl = null;
+}
+
+// Keep the camera preview in step with the screen preview.
+function syncPreviewCamera() {
+  if (!previewCameraUrl) return;
+  const camera = ui.previewCamera;
+  if (Math.abs(camera.currentTime - ui.preview.currentTime) > 0.25) camera.currentTime = ui.preview.currentTime;
 }
 
 // ---------------------------------------------------------------- Events
@@ -728,12 +1033,12 @@ ui.start.addEventListener('click', startRecording);
 ui.pause.addEventListener('click', togglePause);
 ui.stop.addEventListener('click', stopRecording);
 // Remember the choice for the next recording (only when the person saves,
-// not when "Save at once" saves the recording as it is).
+// not when "Save at once" saves automatically).
 ui.save.addEventListener('click', () => {
   const choiceId = selectedChoiceId();
   const patch = { exportPreset: choiceId };
-  if (choiceId !== 'original' && ui.format.value !== 'original') patch.exportFormat = ui.format.value;
-  saveRecorderSettings(patch);
+  if (ui.format.value !== 'original') patch.exportFormat = ui.format.value;
+  saveSettings(patch);
   saveRecording(choiceId);
 });
 ui.cancelExport.addEventListener('click', () => {
@@ -741,17 +1046,35 @@ ui.cancelExport.addEventListener('click', () => {
   if (conversion) conversion.cancel();
 });
 ui.presets.addEventListener('change', async () => {
-  renderFormats(await getRecorderSettings());
+  renderFormats(await getSettings());
 });
+for (const select of [ui.cameraPosition, ui.cameraSize]) {
+  select.addEventListener('change', async () => {
+    const patch = { cameraSize: ui.cameraSize.value };
+    if (ui.cameraPosition.value !== 'hidden') patch.cameraPosition = ui.cameraPosition.value;
+    saveSettings(patch);
+    renderReview(await getSettings());
+  });
+}
+ui.preview.addEventListener('play', () => {
+  if (!previewCameraUrl) return;
+  syncPreviewCamera();
+  ui.previewCamera.play().catch(() => {});
+});
+ui.preview.addEventListener('pause', () => ui.previewCamera.pause());
+ui.preview.addEventListener('seeked', syncPreviewCamera);
+ui.preview.addEventListener('timeupdate', syncPreviewCamera);
 ui.showFile.addEventListener('click', () => {
   if (lastDownloadId !== null) browser.downloads.show(lastDownloadId);
 });
-ui.again.addEventListener('click', () => {
+ui.again.addEventListener('click', async () => {
   if (recording && !recording.saved && !confirmDiscard()) return;
   clearMessage();
   clearReview();
   setView('setup');
+  if (ui.camera.checked && !cameraStream) await startCameraPreview((await getSettings()).cameraDeviceId);
 });
+ui.settingsLink.addEventListener('click', () => browser.runtime.openOptionsPage());
 
 window.addEventListener('beforeunload', (event) => {
   const recordingNow = mediaRecorder && mediaRecorder.state !== 'inactive';
@@ -760,6 +1083,10 @@ window.addEventListener('beforeunload', (event) => {
     event.preventDefault();
     event.returnValue = '';
   }
+});
+// If the tab closes or navigates during a recording, clear the badge.
+window.addEventListener('pagehide', () => {
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') reportState('idle');
 });
 
 setView('setup');

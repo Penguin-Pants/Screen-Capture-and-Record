@@ -10,49 +10,52 @@ function showSaved() {
   savedTimer = setTimeout(() => savedBadge.classList.remove('show'), 1200);
 }
 
-function updateJpegControls(format) {
-  document.getElementById('jpegQuality').disabled = format !== 'jpeg';
+function fillSelect(select, items) {
+  for (const item of items) select.add(new Option(item.label, item.id));
+}
+
+function profileLabel(profile) {
+  const size = profile.maxWidth ? `up to ${profile.maxWidth} × ${profile.maxHeight}` : 'full screen size';
+  const perMinute = formatBytes(bytesPerMinute(profile, VOICE_AUDIO_BITS_PER_SECOND));
+  return `${profile.label}: ${size}, ${profile.frameRate} fps (about ${perMinute} per minute)`;
 }
 
 async function init() {
+  fillSelect(document.getElementById('profile'), RECORDING_PROFILES.map((profile) => ({ id: profile.id, label: profileLabel(profile) })));
+  fillSelect(document.getElementById('cameraPosition'), CAMERA_POSITIONS);
+  fillSelect(document.getElementById('cameraSize'), CAMERA_SIZES);
+
   const settings = await getSettings();
+  settings.profile = getRecordingProfile(settings.profile).id;
 
   const bindings = {
-    afterCapture: 'value',
-    imageFormat: 'value',
-    jpegQuality: 'value',
+    profile: 'value',
+    afterRecording: 'value',
+    cameraPosition: 'value',
+    cameraSize: 'value',
     downloadFolder: 'value',
-    saveAs: 'checked',
-    loadLazyContent: 'checked'
+    saveAs: 'checked'
   };
 
-  for (const [key, property] of Object.entries(bindings)) {
-    const input = document.getElementById(key);
-    input[property] = settings[key];
+  for (const [name, property] of Object.entries(bindings)) {
+    const input = document.getElementById(name);
+    input[property] = settings[name];
     const eventName = input.type === 'text' ? 'change' : 'input';
     input.addEventListener(eventName, async () => {
       let value = input[property];
-      if (key === 'jpegQuality') value = Number(value);
-      if (key === 'downloadFolder') {
+      if (name === 'downloadFolder') {
         value = sanitizeFolder(value);
         input.value = value;
       }
-      await saveSettings({ [key]: value });
-      if (key === 'imageFormat') updateJpegControls(value);
-      if (key === 'jpegQuality') document.getElementById('jpegQualityValue').textContent = value;
+      await saveSettings({ [name]: value });
       showSaved();
     });
   }
 
-  document.getElementById('jpegQualityValue').textContent = settings.jpegQuality;
-  updateJpegControls(settings.imageFormat);
-
-  await initRecordingOptions();
-
   const table = document.getElementById('shortcuts');
   for (const command of await browser.commands.getAll()) {
     const row = table.insertRow();
-    row.insertCell().textContent = command.description || command.name;
+    row.insertCell().textContent = command.description || 'Open the screen recorder';
     const keyCell = row.insertCell();
     if (command.shortcut) {
       const kbd = document.createElement('kbd');
@@ -62,30 +65,6 @@ async function init() {
       keyCell.textContent = 'Not set';
     }
   }
-}
-
-// Recording defaults live with the recorder settings, so the recorder page
-// and this page change the same values.
-async function initRecordingOptions() {
-  const recorder = await getRecorderSettings();
-  const profile = document.getElementById('recordingProfile');
-  for (const item of RECORDING_PROFILES) {
-    const size = item.maxWidth ? `up to ${item.maxWidth} \u00d7 ${item.maxHeight}` : 'full screen size';
-    const perMinute = formatBytes(bytesPerMinute(item, VOICE_AUDIO_BITS_PER_SECOND));
-    profile.add(new Option(`${item.label}: ${size}, ${item.frameRate} fps (about ${perMinute} per minute)`, item.id));
-  }
-  profile.value = getRecordingProfile(recorder.profile).id;
-  const afterRecording = document.getElementById('afterRecording');
-  afterRecording.value = recorder.afterRecording;
-
-  profile.addEventListener('input', async () => {
-    await saveRecorderSettings({ profile: profile.value });
-    showSaved();
-  });
-  afterRecording.addEventListener('input', async () => {
-    await saveRecorderSettings({ afterRecording: afterRecording.value });
-    showSaved();
-  });
 }
 
 init();

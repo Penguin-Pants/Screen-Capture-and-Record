@@ -2,7 +2,7 @@
 // extension pages can run in a normal Chromium page during tests.
 // Every call is recorded in window.__calls.
 (() => {
-  const calls = { messages: [], downloads: [], clipboard: [], shown: [], tabsCreated: [], captureTab: [], executeScript: [] };
+  const calls = { messages: [], downloads: [], shown: [], tabsCreated: [], tabsUpdated: [], badge: [] };
   const store = {};
   const downloadListeners = new Set();
   const clone = (value) => (value === undefined ? value : JSON.parse(JSON.stringify(value)));
@@ -10,26 +10,31 @@
   window.__calls = calls;
   window.__downloadBlobs = [];
   window.__store = store;
+  // Pages that extension.getViews() returns (tests can add fake views).
+  window.__views = [];
 
-  // A 400x300 test image: red left half, blue right half.
-  window.__makeCaptureDataUrl = () => {
-    const canvas = document.createElement('canvas');
-    canvas.width = 400;
-    canvas.height = 300;
-    const ctx = canvas.getContext('2d');
-    ctx.fillStyle = '#ff0000';
-    ctx.fillRect(0, 0, 200, 300);
-    ctx.fillStyle = '#0000ff';
-    ctx.fillRect(200, 0, 200, 300);
-    return canvas.toDataURL('image/png');
+  // An event object that keeps its listeners, so tests can fire them.
+  const event = () => {
+    const listeners = [];
+    return {
+      listeners,
+      addListener: (listener) => listeners.push(listener),
+      removeListener: (listener) => {
+        const index = listeners.indexOf(listener);
+        if (index >= 0) listeners.splice(index, 1);
+      }
+    };
   };
 
-  // Event objects that only record listeners (enough to load background.js).
-  const event = () => ({ addListener() {}, removeListener() {} });
-
   window.browser = {
-    browserAction: { setBadgeText() {}, setBadgeBackgroundColor() {} },
-    notifications: { create: async () => 'n1', onClicked: event(), onClosed: event() },
+    browserAction: {
+      onClicked: event(),
+      setBadgeText: (details) => calls.badge.push({ text: details.text }),
+      setBadgeBackgroundColor: () => {}
+    },
+    extension: {
+      getViews: () => window.__views
+    },
     storage: {
       local: {
         async get(keys) {
@@ -47,9 +52,6 @@
       getURL: (path) => new URL(path.replace(/^\//, ''), location.href).href,
       async sendMessage(message) {
         calls.messages.push(clone(message));
-        if (message.action === 'getCapture') {
-          return message.id === 'missing' ? null : { name: 'area-test', dataUrl: window.__makeCaptureDataUrl() };
-        }
         return { ok: true };
       },
       openOptionsPage: async () => calls.messages.push({ action: 'openOptionsPage' }),
@@ -71,25 +73,25 @@
       show: async (id) => calls.shown.push(id),
       showDefaultFolder: async () => calls.shown.push('default')
     },
-    clipboard: {
-      async setImageData(buffer, type) {
-        calls.clipboard.push({ bytes: buffer.byteLength, type });
-      }
-    },
     tabs: {
-      query: async () => [{ id: 7, index: 0, windowId: 1, url: window.__activeTabUrl || 'https://example.com/' }],
+      getCurrent: async () => ({ id: 42, windowId: 3 }),
       create: async (options) => {
         calls.tabsCreated.push(options);
         return { id: 99 };
       },
+      update: async (id, options) => {
+        calls.tabsUpdated.push({ id, ...options });
+        return { id, windowId: 3 };
+      },
       onRemoved: event()
+    },
+    windows: {
+      update: async () => ({})
     },
     commands: {
       onCommand: event(),
       getAll: async () => [
-        { name: 'capture-area', description: 'Capture a selected area', shortcut: 'Alt+Shift+A' },
-        { name: 'capture-visible', description: 'Capture the visible area', shortcut: 'Alt+Shift+S' },
-        { name: 'capture-fullpage', description: 'Capture the full page', shortcut: '' }
+        { name: '_execute_browser_action', description: 'Open the screen recorder', shortcut: 'Alt+Shift+R' }
       ]
     }
   };

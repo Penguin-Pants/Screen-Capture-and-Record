@@ -33,7 +33,6 @@
     .row select, .row input[type="text"] {
       width: 100%; padding: 7px 9px; border: 1px solid #ccc; border-radius: 8px; font: inherit;
     }
-    .row input[type="range"] { width: 100%; }
     .inline { display: flex; align-items: center; gap: 10px; }
 
     .shortcuts { width: 100%; border-collapse: collapse; }
@@ -61,37 +60,38 @@
     </div>
 
     <div class="card">
-      <h2>After a capture</h2>
+      <h2>Recording</h2>
       <div class="row">
-        <label for="afterCapture">Action</label>
-        <select id="afterCapture">
-          <option value="editor">Open in the editor</option>
-          <option value="download">Save to the Downloads folder</option>
-          <option value="clipboard">Copy to the clipboard</option>
-        </select>
+        <label for="profile">Default quality<small>Used for new recordings. You can change it on the recorder page.</small></label>
+        <select id="profile"></select>
       </div>
       <div class="row">
-        <label for="loadLazyContent">Full page: load lazy content<small>Scrolls the page once before capture so late images appear.</small></label>
-        <div class="inline"><input type="checkbox" id="loadLazyContent"></div>
+        <label for="afterRecording">After recording</label>
+        <select id="afterRecording">
+          <option value="review">Show the video and size options first</option>
+          <option value="save">Save at once</option>
+        </select>
+      </div>
+      <p class="hint">File size depends on quality and length. The recorder shows the size while you record. After you stop, you can also save a smaller copy.</p>
+    </div>
+
+    <div class="card">
+      <h2>Camera</h2>
+      <div class="row">
+        <label for="cameraPosition">Camera position<small>Where your camera shows in the video. You can change it after each recording.</small></label>
+        <select id="cameraPosition"></select>
+      </div>
+      <div class="row">
+        <label for="cameraSize">Camera size</label>
+        <select id="cameraSize"></select>
       </div>
     </div>
 
     <div class="card">
       <h2>Saved files</h2>
       <div class="row">
-        <label for="imageFormat">Image format</label>
-        <select id="imageFormat">
-          <option value="png">PNG (lossless)</option>
-          <option value="jpeg">JPEG (smaller files)</option>
-        </select>
-      </div>
-      <div class="row">
-        <label for="jpegQuality">JPEG quality</label>
-        <div class="inline"><input type="range" id="jpegQuality" min="10" max="100" step="1"><span id="jpegQualityValue"></span></div>
-      </div>
-      <div class="row">
         <label for="downloadFolder">Subfolder<small>Inside your Downloads folder. Empty means no subfolder.</small></label>
-        <input type="text" id="downloadFolder" placeholder="Screenshots" spellcheck="false">
+        <input type="text" id="downloadFolder" placeholder="Recordings" spellcheck="false">
       </div>
       <div class="row">
         <label for="saveAs">Ask where to save</label>
@@ -100,30 +100,14 @@
     </div>
 
     <div class="card">
-      <h2>Screen recording</h2>
-      <div class="row">
-        <label for="recordingProfile">Default quality<small>Used for new recordings. You can change it on the recorder page.</small></label>
-        <select id="recordingProfile"></select>
-      </div>
-      <div class="row">
-        <label for="afterRecording">After recording</label>
-        <select id="afterRecording">
-          <option value="review">Show the video and size options first</option>
-          <option value="save">Save at once, as recorded</option>
-        </select>
-      </div>
-      <p class="hint">File size depends on quality and length. The recorder shows the size while you record. After you stop, you can also save a smaller copy.</p>
-    </div>
-
-    <div class="card">
-      <h2>Keyboard shortcuts</h2>
+      <h2>Keyboard shortcut</h2>
       <table class="shortcuts" id="shortcuts"></table>
       <p class="hint">To change a shortcut: open <strong>about:addons</strong>, click the gear icon, then <strong>Manage Extension Shortcuts</strong>.</p>
     </div>
 
     <div class="card">
       <h2>Privacy</h2>
-      <p>All captures, edits and recordings stay on your device. The extension sends no data to any server.</p>
+      <p>Recordings stay on your device. The extension sends no data to any server and cannot read the websites you visit.</p>
     </div>
   </div>
 
