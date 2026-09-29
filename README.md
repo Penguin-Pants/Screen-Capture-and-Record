@@ -82,6 +82,7 @@ docs/           Reverse-engineering report of the original extension
 
 - Firefox gives no system or tab audio to `getDisplayMedia`. Recordings can include the microphone only.
 - The camera bubble is added when you save, so a video with the camera always takes a short export step.
+- With the camera, **Full size** needs a video encoder that takes the full size of the recording. On a very large screen (for example 4K), some systems cannot do this. The review then turns off **Full size** and you choose a smaller size.
 - Size estimates are approximate. Encoders can go a little above the target bitrate (estimates add 10%), and screens with little motion often make smaller files.
 
 ## Third-party code

@@ -44,6 +44,8 @@ const fakeMedia = () => {
   navigator.mediaDevices.getUserMedia = async (constraints) => {
     window.__userMedia = (window.__userMedia || []).concat([constraints]);
     if (constraints.video) {
+      // A camera answer can come late, for example while Firefox asks.
+      if (window.__cameraDelay) await new Promise((resolve) => setTimeout(resolve, window.__cameraDelay));
       if (window.__denyCamera) throw new DOMException('The user denied the camera.', 'NotAllowedError');
       const camera = document.createElement('canvas');
       camera.width = 640;
@@ -70,9 +72,11 @@ const fakeMedia = () => {
   };
 };
 
+// init: a function or a list of functions that run after fakeMedia.
 async function openRecorder(init) {
-  const opened = await openPage('recorder.html', '', init ? [fakeMedia, init] : fakeMedia);
-  await opened.page.waitForFunction(() => document.getElementById('profileSelect').options.length > 0);
+  const opened = await openPage('recorder.html', '', [fakeMedia].concat(init || []));
+  // Start comes on when the saved settings are in the controls.
+  await opened.page.waitForFunction(() => !document.getElementById('startBtn').disabled);
   await opened.page.selectOption('#countdownSelect', '0');
   return opened;
 }
@@ -120,6 +124,35 @@ test('quality profile sets the screen size limit and the size estimate', { skip 
   });
   await page.waitForFunction(() => /\d (KB|MB) so far/.test(document.getElementById('liveSize').textContent));
   await page.click('#stopBtn');
+  assert.deepEqual(errors, []);
+  await context.close();
+});
+
+test('Start waits for the saved settings, but not for the camera answer', { skip }, async () => {
+  const { page, context, errors } = await openPage('recorder.html', '', [fakeMedia, () => {
+    // Saved settings that load slowly, and a camera that answers slowly.
+    Object.assign(window.__store, { 'setting.profile': 'medium', 'setting.countdown': 0, 'setting.camera': true });
+    window.__cameraDelay = 1500;
+    const get = browser.storage.local.get;
+    browser.storage.local.get = async (keys) => {
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      return get(keys);
+    };
+  }]);
+  assert.equal(await page.isDisabled('#startBtn'), true, 'Start is off while the settings load');
+  await page.waitForFunction(() => !document.getElementById('startBtn').disabled);
+  assert.equal(await page.inputValue('#profileSelect'), 'medium');
+  assert.equal(await page.evaluate(() => cameraStream), null, 'the camera has not answered yet');
+
+  // Start before the camera answers: the recording uses the same camera request.
+  await page.click('#startBtn');
+  await page.waitForFunction(() => document.getElementById('live').classList.contains('active'));
+  assert.equal(await page.evaluate(() => window.__userMedia.filter((c) => c.video).length), 1, 'one camera request');
+  assert.equal(await page.isVisible('#liveCamera'), true);
+  await page.waitForTimeout(800);
+  await page.click('#stopBtn');
+  await page.waitForFunction(() => document.getElementById('result').classList.contains('active'));
+  assert.match(await page.textContent('#details'), / · with camera$/);
   assert.deepEqual(errors, []);
   await context.close();
 });
@@ -409,6 +442,116 @@ test('camera: a denied camera unticks the option and says why', { skip }, async 
   assert.equal(await page.isChecked('#cameraCheck'), false);
   assert.match(await page.textContent('#message'), /did not allow the camera/);
   assert.equal(await page.evaluate(() => window.__store['setting.camera']), false);
+  await context.close();
+});
+
+test('camera: a late answer to an old camera request is not used', { skip }, async () => {
+  const { page, context, errors } = await openRecorder(() => { window.__cameraDelay = 400; });
+  const cameraRequests = () => page.evaluate(() => (window.__userMedia || []).filter((c) => c.video));
+
+  // Turn the camera on, then off before it answers.
+  await page.check('#cameraCheck');
+  await page.waitForFunction(() => (window.__userMedia || []).some((c) => c.video));
+  await page.uncheck('#cameraCheck');
+  await page.waitForTimeout(700);
+  assert.equal((await cameraRequests()).length, 1);
+  assert.equal(await liveTrackCount(page), 0, 'the late camera is stopped');
+  assert.equal(await page.isVisible('#cameraSetup'), false);
+  assert.equal(await page.evaluate(() => cameraStream), null);
+
+  // Choose two cameras quickly: only the last one stays open.
+  await page.check('#cameraCheck');
+  await page.waitForFunction(() => document.getElementById('cameraSetup').classList.contains('show'));
+  await page.evaluate(() => {
+    const select = document.getElementById('cameraDevice');
+    for (const id of ['cam-usb', 'cam-front']) {
+      select.value = id;
+      select.dispatchEvent(new Event('change'));
+    }
+  });
+  await page.waitForFunction(() => document.getElementById('cameraSetup').classList.contains('show'));
+  const requests = await cameraRequests();
+  assert.equal(requests.length, 4);
+  assert.deepEqual(requests[3].video.deviceId, { exact: 'cam-front' });
+  assert.equal(await liveTrackCount(page), 1, 'only the newest camera is open');
+  assert.equal(await page.evaluate(() => cameraStream.getVideoTracks()[0].readyState), 'live');
+  assert.deepEqual(errors, []);
+  await context.close();
+});
+
+// An encoder that takes at most 1920 pixels in width for the codecs in
+// window.__narrowCodecs (codec string prefixes, for example 'vp09').
+const narrowEncoder = () => {
+  const isConfigSupported = VideoEncoder.isConfigSupported.bind(VideoEncoder);
+  VideoEncoder.isConfigSupported = async (config) => {
+    const narrow = (window.__narrowCodecs || []).some((prefix) => config.codec.startsWith(prefix));
+    return narrow && config.width > 1920 ? { supported: false, config } : isConfigSupported(config);
+  };
+};
+
+test('camera: "Full size" is off when the encoder cannot take the full size', { skip }, async () => {
+  const { page, context, errors } = await openRecorder([narrowEncoder, () => {
+    window.__fakeScreen = { width: 2048, height: 1152 };
+    window.__narrowCodecs = ['vp09', 'vp8', 'avc1'];
+  }]);
+  await page.selectOption('#profileSelect', 'max');
+  await page.evaluate(() => saveSettings({ afterRecording: 'save', exportPreset: 'original' }));
+  await page.check('#cameraCheck');
+  await page.waitForFunction(() => document.getElementById('cameraSetup').classList.contains('show'));
+  await record(page, 1200);
+
+  await page.waitForFunction(() => document.getElementById('message').classList.contains('show'));
+  assert.equal(await page.textContent('#message'),
+    'This browser cannot make the video with your camera at full size. Choose a smaller size, then click Save.');
+  const choices = await page.$$eval('#presets .preset', (labels) => labels.map((label) => ({
+    id: label.querySelector('input').value,
+    text: label.textContent,
+    enabled: !label.querySelector('input').disabled,
+    checked: label.querySelector('input').checked
+  })));
+  assert.match(choices[0].text, /^Full size · 2048 × 1152, 30 fps \(this browser cannot encode this size\)/);
+  assert.equal(choices[0].enabled, false);
+  const chosen = choices.find((choice) => choice.checked);
+  assert.ok(chosen && chosen.enabled && chosen.id !== 'original', `an enabled size is chosen: ${JSON.stringify(chosen)}`);
+  assert.notEqual(await page.inputValue('#formatSelect'), 'original');
+  assert.equal(await page.evaluate(() => window.__calls.downloads.length), 0, '"Save at once" does not save');
+  assert.deepEqual(errors, []);
+  await context.close();
+});
+
+test('camera: "Full size" uses a codec that the encoder takes at the full size', { skip }, async () => {
+  const { page, context, errors } = await openRecorder([narrowEncoder, () => {
+    window.__fakeScreen = { width: 2048, height: 1152 };
+    window.__narrowCodecs = ['vp09'];
+  }]);
+  await page.selectOption('#profileSelect', 'max');
+  await page.check('#cameraCheck');
+  await page.waitForFunction(() => document.getElementById('cameraSetup').classList.contains('show'));
+  await record(page, 1200);
+
+  const first = await page.$eval('#presets .preset', (label) => ({
+    text: label.textContent,
+    enabled: !label.querySelector('input').disabled
+  }));
+  assert.equal(first.enabled, true, first.text);
+  assert.match(first.text, /^Full size · 2048 × 1152, 30 fps.*about [\d.]+ (KB|MB)$/);
+  await page.check('#presets input[value="original"]');
+  assert.equal(await page.inputValue('#formatSelect'), 'webm');
+  await page.click('#saveBtn');
+  await page.waitForFunction(() => window.__calls.downloads.length === 1, null, { timeout: 60000 });
+
+  const saved = await page.evaluate(async () => {
+    const mb = await loadMediabunny();
+    const input = new mb.Input({ formats: mb.ALL_FORMATS, source: new mb.BlobSource(window.__downloadBlobs[0]) });
+    const track = await input.getPrimaryVideoTrack();
+    const result = { codec: track.codec, width: track.codedWidth, height: track.codedHeight };
+    input.dispose();
+    return result;
+  });
+  assert.deepEqual(saved, { codec: 'vp8', width: 2048, height: 1152 });
+  const box = await page.evaluate(() => cameraBubbleRect(2048, 1152, 'bottom-right', 'medium'));
+  assert.ok(isGreen(await pixelAt(page, 0, 0.5, box.x + box.diameter / 2, box.y + box.diameter / 2)), 'the bubble is in the video');
+  assert.deepEqual(errors, []);
   await context.close();
 });
 

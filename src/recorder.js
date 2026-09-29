@@ -67,6 +67,8 @@ let cameraChunks = [];
 let recordedBytes = 0;
 let sourceStreams = [];     // Screen and microphone streams. All tracks stop at the end.
 let cameraStream = null;    // The webcam stream: preview before and during recording
+let cameraRequest = 0;      // Number of the newest camera request (see startCameraPreview)
+let cameraPending = null;   // The camera request that waits for an answer, if any
 let audioContext = null;
 let activeMs = 0;           // Recorded time before the last resume
 let resumedAt = 0;
@@ -146,7 +148,12 @@ async function initOptions() {
   ui.cameraPosition.add(new Option('Hide camera', 'hidden'));
   for (const size of CAMERA_SIZES) ui.cameraSize.add(new Option(`${size.label} size`, size.id));
 
-  const settings = await getSettings();
+  // Start stays off (see recorder.html) until the saved settings are in
+  // the controls.
+  const settings = await getSettings().catch((error) => {
+    console.warn('Could not read the settings. Using the defaults.', error);
+    return { ...SETTINGS_DEFAULTS };
+  });
   ui.profile.value = getRecordingProfile(settings.profile).id;
   ui.countdownSelect.value = String(settings.countdown);
   ui.mic.checked = settings.microphone;
@@ -158,7 +165,9 @@ async function initOptions() {
     ui.cameraNote.textContent = '(needs Firefox 130 or later)';
   } else if (settings.camera) {
     ui.camera.checked = true;
-    await startCameraPreview(settings.cameraDeviceId);
+    // Do not wait for the answer to the camera request. If you click Start
+    // first, the recording waits for this request (see ensureCamera).
+    startCameraPreview(settings.cameraDeviceId);
   }
 
   const persist = () => saveSettings({
@@ -172,37 +181,48 @@ async function initOptions() {
     persist();
   }));
 
-  ui.camera.addEventListener('change', async () => {
+  ui.camera.addEventListener('change', () => {
     saveSettings({ camera: ui.camera.checked });
-    if (ui.camera.checked) {
-      await startCameraPreview((await getSettings()).cameraDeviceId);
-    } else {
-      stopCamera();
-    }
+    if (ui.camera.checked) ensureCamera();
+    else stopCamera();
   });
-  ui.cameraDevice.addEventListener('change', async () => {
+  ui.cameraDevice.addEventListener('change', () => {
     saveSettings({ cameraDeviceId: ui.cameraDevice.value });
-    await startCameraPreview(ui.cameraDevice.value);
+    startCameraPreview(ui.cameraDevice.value);
   });
+  ui.start.disabled = false;
 }
 
 // Open the webcam for the preview. The same stream is recorded later, so
-// Firefox asks for permission only once.
-async function startCameraPreview(deviceId) {
+// Firefox asks for permission only once. Each request gets a number. If
+// the camera is turned off or another camera request starts before the
+// answer comes, the old answer is not used and its camera stops at once.
+function startCameraPreview(deviceId) {
   stopCamera();
+  const request = ++cameraRequest;
+  const pending = openCamera(request, deviceId).finally(() => {
+    if (cameraPending === pending) cameraPending = null;
+  });
+  cameraPending = pending;
+  return pending;
+}
+
+async function openCamera(request, deviceId) {
   const video = { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } };
+  let stream;
   try {
     try {
-      cameraStream = await navigator.mediaDevices.getUserMedia({
+      stream = await navigator.mediaDevices.getUserMedia({
         video: deviceId ? { ...video, deviceId: { exact: deviceId } } : video,
         audio: false
       });
     } catch (error) {
       if (!deviceId || error.name !== 'OverconstrainedError') throw error;
       // The saved camera is gone. Use the default camera.
-      cameraStream = await navigator.mediaDevices.getUserMedia({ video, audio: false });
+      stream = await navigator.mediaDevices.getUserMedia({ video, audio: false });
     }
   } catch (error) {
+    if (request !== cameraRequest) return;
     ui.camera.checked = false;
     saveSettings({ camera: false });
     updateCameraSetup();
@@ -211,12 +231,30 @@ async function startCameraPreview(deviceId) {
       : `The camera is not available (${error.message}).`, 'error');
     return;
   }
+  if (request !== cameraRequest) {
+    stream.getTracks().forEach((track) => track.stop());
+    return;
+  }
+  cameraStream = stream;
   ui.cameraPreview.srcObject = cameraStream;
   updateCameraSetup();
   await fillCameraDevices();
 }
 
+// Open the camera if the camera option is on and no camera is open or
+// opening. Resolves when the newest camera request has its answer.
+async function ensureCamera() {
+  if (ui.camera.checked && !cameraStream && !cameraPending) {
+    const { cameraDeviceId } = await getSettings();
+    if (ui.camera.checked && !cameraStream && !cameraPending) startCameraPreview(cameraDeviceId);
+  }
+  while (cameraPending) await cameraPending;
+}
+
 function stopCamera() {
+  // A camera request that has no answer yet is no longer wanted.
+  cameraRequest++;
+  cameraPending = null;
   if (cameraStream) cameraStream.getTracks().forEach((track) => track.stop());
   cameraStream = null;
   ui.cameraPreview.srcObject = null;
@@ -358,7 +396,9 @@ async function startRecording() {
     if (mimeType) options.mimeType = mimeType;
     if (hasAudio) options.audioBitsPerSecond = audioBits;
 
-    if (ui.camera.checked && !cameraStream) await startCameraPreview((await getSettings()).cameraDeviceId);
+    // If a camera request is open (for example, from page load), wait for
+    // it. A second request would make Firefox ask again.
+    await ensureCamera();
     const withCamera = Boolean(ui.camera.checked && cameraStream);
 
     const countdownDone = await runCountdown(Number(ui.countdownSelect.value));
@@ -523,7 +563,7 @@ async function finishRecording() {
   if (chunks.length === 0) {
     setView('setup');
     showMessage('The recording is empty. Nothing was saved.', 'error');
-    if (ui.camera.checked) startCameraPreview((await getSettings()).cameraDeviceId);
+    ensureCamera();
     return;
   }
 
@@ -572,6 +612,10 @@ async function finishRecording() {
   renderReview(settings);
 
   if (settings.afterRecording === 'save') {
+    if (!exportChoices()[0].enabled) {
+      showMessage('This browser cannot make the video with your camera at full size. Choose a smaller size, then click Save.', 'info');
+      return;
+    }
     await saveRecording('original');
     if (recording === current && current.saved) {
       showMessage(cameraOn()
@@ -611,16 +655,27 @@ async function detectExportSupport(rec) {
   const check = fitWithin(rec.width, rec.height, EXPORT_PRESETS[0].maxWidth, EXPORT_PRESETS[0].maxHeight);
   const formats = [];
   try {
-    const webmVideo = await mb.getFirstEncodableVideoCodec(['vp9', 'vp8'], check);
+    const webmCodecs = ['vp9', 'vp8'];
+    const webmVideo = await mb.getFirstEncodableVideoCodec(webmCodecs, check);
     const webmAudio = rec.hasAudio ? await mb.getFirstEncodableAudioCodec(['opus']) : null;
     if (webmVideo && (!rec.hasAudio || webmAudio)) {
-      formats.push({ id: 'webm', label: 'WebM (small files, plays in browsers)', container: 'webm', videoCodec: webmVideo, audioCodec: webmAudio });
+      formats.push({ id: 'webm', label: 'WebM (small files, plays in browsers)', container: 'webm', videoCodecs: webmCodecs, videoCodec: webmVideo, audioCodec: webmAudio });
     }
-    const mp4Video = await mb.getFirstEncodableVideoCodec(['avc'], check);
+    const mp4Codecs = ['avc'];
+    const mp4Video = await mb.getFirstEncodableVideoCodec(mp4Codecs, check);
     const mp4Audio = rec.hasAudio ? await mb.getFirstEncodableAudioCodec(['aac', 'opus']) : null;
     if (mp4Video && (!rec.hasAudio || mp4Audio)) {
       const label = mp4Audio === 'opus' ? 'MP4 (H.264 video, Opus audio)' : 'MP4 (plays in more apps)';
-      formats.push({ id: 'mp4', label, container: 'mp4', videoCodec: mp4Video, audioCodec: mp4Audio });
+      formats.push({ id: 'mp4', label, container: 'mp4', videoCodecs: mp4Codecs, videoCodec: mp4Video, audioCodec: mp4Audio });
+    }
+    // With the camera, "Full size" encodes at the size of the recording,
+    // which can be larger than the size above (for example 4K). Some
+    // encoders cannot take that size, or only with another codec.
+    if (rec.camera) {
+      const full = { ...fitWithin(rec.width, rec.height, null, null), bitrate: rec.videoBitsPerSecond, frameRate: rec.frameRate };
+      for (const format of formats) {
+        format.fullSizeCodec = await mb.getFirstEncodableVideoCodec(format.videoCodecs, full);
+      }
     }
   } catch (error) {
     console.warn('Could not check the video encoders:', error);
@@ -660,12 +715,13 @@ function exportChoices() {
       frameRate: recording.frameRate,
       videoBitsPerSecond: recording.videoBitsPerSecond
     }, sourceInfo());
+    const encodable = formatsFor('original').length > 0;
     original = {
       id: 'original',
       name: 'Full size',
-      spec: `${plan.width} × ${plan.height}, ${plan.frameRate} fps`,
+      spec: `${plan.width} × ${plan.height}, ${plan.frameRate} fps${encodable ? '' : ' (this browser cannot encode this size)'}`,
       size: `about ${formatBytes(plan.bytes)}`,
-      enabled: transcode,
+      enabled: encodable,
       plan
     };
   } else {
@@ -699,6 +755,15 @@ function selectedChoiceId() {
   return checked ? checked.value : 'original';
 }
 
+// The output formats for a choice. "As recorded" keeps the format of the
+// recording. "Full size" with the camera can use only the formats whose
+// encoder takes the full size of the recording.
+function formatsFor(choiceId) {
+  if (!exportSupport) return [];
+  if (choiceId !== 'original') return exportSupport.formats;
+  return cameraOn() ? exportSupport.formats.filter((format) => format.fullSizeCodec) : [];
+}
+
 function renderReview(settings) {
   const rec = recording;
   const parts = [`Length ${formatDuration(rec.seconds)}`];
@@ -712,7 +777,8 @@ function renderReview(settings) {
 
   const choices = exportChoices();
   const current = ui.presets.querySelector('input:checked') ? selectedChoiceId() : settings.exportPreset;
-  const wanted = choices.find((choice) => choice.id === current && choice.enabled) ? current : 'original';
+  const enabled = choices.filter((choice) => choice.enabled);
+  const wanted = enabled.some((choice) => choice.id === current) ? current : (enabled[0] || choices[0]).id;
 
   ui.presets.replaceChildren(...choices.map((choice) => {
     const label = document.createElement('label');
@@ -773,8 +839,7 @@ function renderStage() {
 }
 
 function renderFormats(settings) {
-  const asRecorded = selectedChoiceId() === 'original' && !cameraOn();
-  const formats = asRecorded || !exportSupport ? [] : exportSupport.formats;
+  const formats = formatsFor(selectedChoiceId());
   const previous = ui.format.value && ui.format.value !== 'original' ? ui.format.value : settings.exportFormat;
   ui.format.replaceChildren();
   if (formats.length === 0) {
@@ -948,7 +1013,8 @@ async function saveRecording(choiceId = selectedChoiceId()) {
     if (!choice.plan) {
       blob = await remuxRecording();
     } else {
-      const format = exportSupport.formats.find((item) => item.id === ui.format.value) || exportSupport.formats[0];
+      const formats = formatsFor(choice.id);
+      const format = formats.find((item) => item.id === ui.format.value) || formats[0];
       const plan = choice.plan;
       const trackOptions = {
         video: {
@@ -958,7 +1024,8 @@ async function saveRecording(choiceId = selectedChoiceId()) {
           // rounding to even sizes (no black bars).
           fit: 'fill',
           frameRate: plan.frameRate,
-          codec: format.videoCodec,
+          // "Full size" (with the camera) can need another codec.
+          codec: choice.id === 'original' ? format.fullSizeCodec : format.videoCodec,
           bitrate: plan.videoBitsPerSecond,
           forceTranscode: true
         }
@@ -1067,12 +1134,12 @@ ui.preview.addEventListener('timeupdate', syncPreviewCamera);
 ui.showFile.addEventListener('click', () => {
   if (lastDownloadId !== null) browser.downloads.show(lastDownloadId);
 });
-ui.again.addEventListener('click', async () => {
+ui.again.addEventListener('click', () => {
   if (recording && !recording.saved && !confirmDiscard()) return;
   clearMessage();
   clearReview();
   setView('setup');
-  if (ui.camera.checked && !cameraStream) await startCameraPreview((await getSettings()).cameraDeviceId);
+  ensureCamera();
 });
 ui.settingsLink.addEventListener('click', () => browser.runtime.openOptionsPage());
 
