@@ -3,205 +3,159 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Screen Recorder - ScreenCapture Pro</title>
+  <title>Screen Recorder - Screen Capture and Record</title>
   <style>
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
 
     body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font: 14px/1.5 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
       background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
       min-height: 100vh;
       display: flex;
       align-items: center;
       justify-content: center;
-      padding: 20px;
+      padding: 24px 16px;
+      color: #222;
     }
 
     .container {
-      background: white;
-      border-radius: 20px;
-      padding: 40px;
-      max-width: 500px;
+      background: #fff;
+      border-radius: 18px;
+      padding: 32px;
+      max-width: 560px;
       width: 100%;
       box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-      text-align: center;
     }
 
-    h1 {
-      color: #333;
-      margin-bottom: 10px;
-      font-size: 32px;
-    }
+    h1 { font-size: 26px; text-align: center; }
+    .subtitle { text-align: center; color: #666; margin-bottom: 22px; }
 
-    p {
-      color: #666;
-      margin-bottom: 30px;
-      font-size: 16px;
-    }
+    .panel { background: #f6f7fb; border-radius: 12px; padding: 16px 18px; margin-bottom: 16px; }
+    .row { display: grid; grid-template-columns: 150px 1fr; gap: 10px; align-items: center; padding: 6px 0; }
+    .row label { font-weight: 600; }
+    .row select { width: 100%; padding: 6px 8px; border: 1px solid #ccc; border-radius: 8px; font: inherit; background: #fff; }
+    .check { display: flex; align-items: center; gap: 8px; padding: 6px 0; }
+    .check input { width: 18px; height: 18px; }
+    .check small { color: #777; }
 
     .btn {
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      color: white;
+      display: block;
+      width: 100%;
+      padding: 14px 20px;
       border: none;
       border-radius: 12px;
-      padding: 18px 40px;
-      font-size: 18px;
-      font-weight: 700;
-      cursor: pointer;
-      transition: all 0.3s ease;
-      width: 100%;
-      margin-bottom: 15px;
-    }
-
-    .btn:hover:not(:disabled) {
-      transform: translateY(-2px);
-      box-shadow: 0 10px 30px rgba(102, 126, 234, 0.4);
-    }
-
-    .btn:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
-    }
-
-    .btn-stop {
-      background: #ff4444;
-    }
-
-    .btn-stop:hover {
-      box-shadow: 0 10px 30px rgba(255, 68, 68, 0.4);
-    }
-
-    .recording-status {
-      display: none;
-      background: #f8f9fa;
-      padding: 20px;
-      border-radius: 12px;
-      margin: 20px 0;
-    }
-
-    .recording-status.active {
-      display: block;
-    }
-
-    .rec-indicator {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 10px;
-      font-size: 18px;
-      font-weight: 600;
-      color: #ff4444;
-      margin-bottom: 15px;
-    }
-
-    .rec-dot {
-      width: 12px;
-      height: 12px;
-      background: #ff4444;
-      border-radius: 50%;
-      animation: blink 1s infinite;
-    }
-
-    @keyframes blink {
-      0%, 50%, 100% { opacity: 1; }
-      25%, 75% { opacity: 0.3; }
-    }
-
-    .timer {
-      font-size: 32px;
-      font-weight: 700;
-      color: #333;
-      font-family: 'Courier New', monospace;
-    }
-
-    .options {
-      background: #f8f9fa;
-      padding: 20px;
-      border-radius: 12px;
-      margin: 20px 0;
-      text-align: left;
-    }
-
-    .option-item {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      margin-bottom: 15px;
-    }
-
-    .option-item:last-child {
-      margin-bottom: 0;
-    }
-
-    .option-item input[type="checkbox"] {
-      width: 20px;
-      height: 20px;
+      font: 700 16px system-ui, sans-serif;
+      color: #fff;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
       cursor: pointer;
     }
+    .btn:hover:not(:disabled) { filter: brightness(1.08); }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-stop { background: #d93025; }
+    .btn-secondary { background: #6b6b80; }
+    .btn-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 
-    .option-item label {
-      cursor: pointer;
-      color: #333;
-      font-size: 14px;
-    }
+    .live { display: none; text-align: center; }
+    .live.active { display: block; }
+    .rec-indicator { display: inline-flex; align-items: center; gap: 8px; font-weight: 700; color: #d93025; }
+    .rec-indicator.paused { color: #6b6b6b; }
+    .rec-dot { width: 12px; height: 12px; border-radius: 50%; background: currentColor; animation: blink 1s infinite; }
+    .rec-indicator.paused .rec-dot { animation: none; }
+    @keyframes blink { 50% { opacity: 0.3; } }
+    .timer { font: 700 40px/1.2 ui-monospace, 'Courier New', monospace; margin: 6px 0 14px; }
 
-    .info {
-      background: #e7f3ff;
-      border-left: 4px solid #667eea;
-      padding: 15px;
-      border-radius: 8px;
-      text-align: left;
-      font-size: 14px;
-      color: #333;
-      margin-top: 20px;
+    .countdown {
+      position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
+      background: rgba(20, 20, 40, 0.75); color: #fff; font: 800 160px/1 system-ui, sans-serif; z-index: 10;
     }
+    .countdown.active { display: flex; }
 
-    .info strong {
-      color: #667eea;
-    }
+    .result { display: none; }
+    .result.active { display: block; }
+    .result video { width: 100%; max-height: 320px; border-radius: 10px; background: #000; margin-bottom: 10px; }
+    .result .meta { color: #444; margin-bottom: 12px; word-break: break-all; }
+
+    .message { display: none; margin-bottom: 16px; padding: 10px 12px; border-radius: 10px; }
+    .message.show { display: block; }
+    .message.error { background: #fde8e7; color: #8a1c14; }
+    .message.info { background: #e8eefc; color: #243a7a; }
+
+    .info { font-size: 13px; color: #555; margin-top: 16px; }
+    .info li { margin-left: 18px; }
   </style>
 </head>
 <body>
   <div class="container">
     <h1>🎥 Screen Recorder</h1>
-    <p id="subtitle">Record your screen with audio</p>
+    <p class="subtitle">Record a screen, a window or a tab</p>
 
-    <div class="options" id="optionsPanel">
-      <div class="option-item">
-        <input type="checkbox" id="audioCheck" checked>
-        <label for="audioCheck">Include audio</label>
+    <div class="message" id="message" role="status"></div>
+
+    <div id="setup">
+      <div class="panel">
+        <div class="row">
+          <label for="formatSelect">Format</label>
+          <select id="formatSelect"></select>
+        </div>
+        <div class="row">
+          <label for="qualitySelect">Quality</label>
+          <select id="qualitySelect">
+            <option value="2500000">Low (2.5 Mbps)</option>
+            <option value="5000000">Standard (5 Mbps)</option>
+            <option value="8000000">High (8 Mbps)</option>
+            <option value="12000000">Very high (12 Mbps)</option>
+          </select>
+        </div>
+        <div class="row">
+          <label for="fpsSelect">Frame rate</label>
+          <select id="fpsSelect">
+            <option value="15">15 fps</option>
+            <option value="30">30 fps</option>
+            <option value="60">60 fps</option>
+          </select>
+        </div>
+        <div class="row">
+          <label for="countdownSelect">Countdown</label>
+          <select id="countdownSelect">
+            <option value="0">Off</option>
+            <option value="3">3 seconds</option>
+            <option value="5">5 seconds</option>
+          </select>
+        </div>
+        <label class="check"><input type="checkbox" id="micCheck"> Include microphone</label>
+        <label class="check"><input type="checkbox" id="audioCheck"> Include system or tab audio <small>(if the browser supplies it)</small></label>
       </div>
-      <div class="option-item">
-        <input type="checkbox" id="micCheck">
-        <label for="micCheck">Include microphone</label>
-      </div>
+      <button class="btn" id="startBtn">Start recording</button>
     </div>
 
-    <button class="btn" id="startBtn">Start Recording</button>
-
-    <div class="recording-status" id="recordingStatus">
-      <div class="rec-indicator">
-        <div class="rec-dot"></div>
-        <span>Recording...</span>
-      </div>
+    <div class="live" id="live">
+      <div class="rec-indicator" id="recIndicator"><span class="rec-dot"></span><span id="recLabel">Recording</span></div>
       <div class="timer" id="timer">00:00</div>
+      <div class="btn-row">
+        <button class="btn btn-secondary" id="pauseBtn">Pause</button>
+        <button class="btn btn-stop" id="stopBtn">Stop</button>
+      </div>
     </div>
 
-    <button class="btn btn-stop" id="stopBtn" style="display: none;">Stop Recording</button>
-
-    <div class="info">
-      <strong>How it works:</strong><br>
-      1. Click "Start Recording"<br>
-      2. Select what to share (entire screen, window, or tab)<br>
-      3. Click "Stop Recording" when done<br>
-      4. Your video will download automatically
+    <div class="result" id="result">
+      <video id="preview" controls></video>
+      <p class="meta" id="resultMeta"></p>
+      <div class="btn-row">
+        <button class="btn btn-secondary" id="showFileBtn">Show file</button>
+        <button class="btn" id="againBtn">New recording</button>
+      </div>
     </div>
+
+    <ul class="info">
+      <li>Firefox asks what to share after you click Start.</li>
+      <li>Firefox does not supply system or tab sound at this time. Use the microphone for narration.</li>
+      <li>The file saves to your Downloads folder when you stop. Keep this tab open while you record.</li>
+    </ul>
   </div>
 
+  <div class="countdown" id="countdown"></div>
+
+  <script src="common.js"></script>
   <script src="recorder.js"></script>
 </body>
 </html>
