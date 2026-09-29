@@ -1,4 +1,4 @@
-# Screen Capture and Record
+# Screen Recorder
 
 Firefox extension that records your screen, with your webcam and microphone, and saves small videos that are easy to share. All processing stays on your device.
 
@@ -53,6 +53,8 @@ Page tests run the extension pages in Chromium, served over a local HTTP server,
 3. Select `src/manifest.json`.
 
 A temporary add-on is removed when Firefox closes. To install it permanently, sign the build on [addons.mozilla.org](https://addons.mozilla.org/developers/) (unlisted is OK), or use Firefox Developer Edition or Nightly with `xpinstall.signatures.required` set to `false`.
+
+The add-on ID is `screen-capture-and-record@penguin-pants`, from the earlier name of the extension (Screen Capture and Record). Keep it: Firefox and addons.mozilla.org use the ID to update installed copies.
 
 ## Manual test in Firefox
 

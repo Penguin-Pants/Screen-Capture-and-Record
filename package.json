@@ -1,5 +1,5 @@
 {
-  "name": "screen-capture-and-record",
+  "name": "screen-recorder",
   "version": "2.0.0",
   "private": true,
   "description": "Firefox extension that records the screen with webcam and microphone and saves small, shareable videos.",
