@@ -617,10 +617,17 @@ function closeMixer() {
 }
 
 // Problems with the sound of a recording: warnings for the review, and
-// notes for the line under the video. Without level values, an input is
-// not judged.
-function soundProblems(s) {
+// notes for the line under the video. soundData: the file has sound
+// packets. Without level values, an input is not judged.
+function soundProblems(s, soundData) {
   if (!s.hasAudio) return { warnings: [], notes: ['no sound'] };
+  if (!soundData) {
+    return {
+      warnings: ['The recording has no sound: the browser recorded no sound data. Before you record again, look ' +
+        'at the level bars.'],
+      notes: ['no sound']
+    };
+  }
   const problems = { warnings: [], notes: [] };
   for (const { input, peak, stopped } of s.inputs) {
     if (peak !== null && peak < SILENCE_LEVEL) {
@@ -873,7 +880,9 @@ function stopRecording() {
     mediaRecorder.stop(); // When both recorders stop, the review opens.
   }
   if (cameraRecorder && cameraRecorder.state !== 'inactive') cameraRecorder.stop();
-  releaseStreams();
+  // Before the recording starts (for example, during the countdown), the
+  // camera and the sound inputs stay open for the next try.
+  releaseStreams({ keepDevices: !mediaRecorder });
   clearInterval(timerInterval);
   reportState('idle');
 }
@@ -962,6 +971,9 @@ async function finishRecording() {
   exportSupport = null;
 
   const size = await waitForVideoSize(ui.preview, session.captureSize);
+  // The file can have no sound data, for example when an input ended at
+  // once. Then it is a recording without sound, and saves say so.
+  const soundData = session.hasAudio && await hasSoundData(blob);
   recording = {
     blob,
     mimeType,
@@ -970,9 +982,9 @@ async function finishRecording() {
     height: size.height,
     frameRate: session.profile.frameRate,
     videoBitsPerSecond: session.profile.videoBitsPerSecond,
-    hasAudio: session.hasAudio,
-    audioBitsPerSecond: session.audioBitsPerSecond,
-    sound: soundProblems(session),
+    hasAudio: soundData,
+    audioBitsPerSecond: soundData ? session.audioBitsPerSecond : 0,
+    sound: soundProblems(session, soundData),
     camera: cameraBlob ? { blob: cameraBlob } : null,
     baseName: `recording-${fileTimestamp(session.startedAt)}`,
     saved: false
@@ -1414,6 +1426,16 @@ async function convertRecording(trackOptions, container, withCamera = false) {
   }
 }
 
+// True when the recording has sound packets. When the check fails or gives
+// no answer in 3 s, the sound counts as there, as before the check.
+async function hasSoundData(blob) {
+  const check = loadMediabunny().then((mb) => hasAudioPackets(mb, blob)).catch((error) => {
+    console.warn('Could not check the sound of the recording:', error);
+    return true;
+  });
+  return Promise.race([check, new Promise((resolve) => setTimeout(resolve, 3000, true))]);
+}
+
 // True when the file has a sound track with at least one packet.
 async function hasAudioPackets(mb, blob) {
   const input = new mb.Input({ formats: mb.ALL_FORMATS, source: new mb.BlobSource(blob) });
@@ -1431,7 +1453,9 @@ function isCancelled(error) {
 
 // "As recorded": copy the tracks into a new file without re-encoding. The
 // new file has a duration and an index, so players can seek in it.
-// MediaRecorder files have neither. If this fails, save the raw file.
+// MediaRecorder files have neither. If this fails, save the raw file. When
+// the recording has sound, the raw file has sound packets (see
+// finishRecording).
 async function remuxRecording() {
   try {
     return await convertRecording({}, recording.mimeType.startsWith('video/mp4') ? 'mp4' : 'webm');

@@ -989,6 +989,49 @@ test('an MP4 copy with Opus sound shows a note about players', { skip }, async (
   await context.close();
 });
 
+test('ending the share during the countdown keeps the camera and the microphone open', { skip }, async () => {
+  const { page, context } = await openRecorder(() => { window.__store['setting.camera'] = true; });
+  await page.check('#micCheck');
+  await page.waitForFunction(() => microphone.stream && cameraStream);
+  await page.selectOption('#countdownSelect', '3');
+  await page.click('#startBtn');
+  await page.waitForFunction(() => document.getElementById('countdown').classList.contains('active'));
+  // You end the share from the Firefox sharing indicator.
+  await page.evaluate(() => sourceStreams[0].getVideoTracks()[0].dispatchEvent(new Event('ended')));
+  await page.waitForFunction(() => !document.getElementById('countdown').classList.contains('active') &&
+    !document.getElementById('startBtn').disabled);
+  assert.equal(await page.evaluate(() => document.getElementById('setup').style.display), '', 'back to the setup');
+  assert.equal(await page.isVisible('#micSetup'), true, 'the level meter still shows');
+  assert.equal(await page.isVisible('#cameraSetup'), true, 'the camera preview still shows');
+  assert.equal((await micRequests(page)).length, 1, 'no new microphone request');
+  assert.equal(await liveTrackCount(page), 2, 'the screen stopped; the camera and the microphone stay open');
+  await context.close();
+});
+
+test('a recording with no sound data says so, and "As recorded" saves it with the warning', { skip }, async () => {
+  const { page, context, errors } = await openRecorder(() => {
+    // The browser records no sound data, for example when an input ends at once.
+    const Real = MediaRecorder;
+    window.MediaRecorder = class extends Real {
+      constructor(stream, options) {
+        super(new MediaStream(stream.getVideoTracks()), { ...options, mimeType: 'video/webm;codecs=vp9' });
+      }
+    };
+  });
+  await page.check('#micCheck');
+  await record(page, 1500);
+  const warning = 'The recording has no sound: the browser recorded no sound data. Before you record again, look at the level bars.';
+  assert.equal(await page.textContent('#message'), warning);
+  assert.match(await page.textContent('#details'), / · no sound$/);
+  await page.check('#presets input[value="original"]');
+  await page.click('#saveBtn');
+  await page.waitForFunction(() => document.getElementById('saved').classList.contains('show'));
+  assert.equal(await page.textContent('#message'), warning, 'the warning stays in view');
+  assert.equal(await soundLevel(page, 0), 0);
+  assert.deepEqual(errors, []);
+  await context.close();
+});
+
 // Read one pixel of a saved video at a time (seconds), as a player shows it.
 function pixelAt(page, index, time, x, y) {
   return page.evaluate(([i, t, px, py]) => new Promise((resolve, reject) => {
