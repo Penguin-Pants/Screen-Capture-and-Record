@@ -85,10 +85,11 @@ const fakeMedia = () => {
     const destination = audio.createMediaStreamDestination();
     oscillator.connect(gain).connect(destination);
     oscillator.start();
-    // Firefox tells the device of a track.
+    // Firefox tells the device and its name for a track.
     const track = destination.stream.getAudioTracks()[0];
     const settings = track.getSettings.bind(track);
     track.getSettings = () => ({ ...settings(), deviceId: device });
+    Object.defineProperty(track, 'label', { value: audioInputs().find((input) => input.deviceId === device).label });
     window.__opened.push(destination.stream);
     return destination.stream;
   };
@@ -846,6 +847,31 @@ test('computer sound: without a loopback device, the hint says that the device i
   assert.equal(await page.textContent('#computerHint'),
     'This is the device of your microphone. Choose your loopback device (for example, Stereo Mix) in the list.');
   assert.equal(await page.isVisible('#computerDeviceRow'), true, 'the list shows with one device too');
+  await context.close();
+});
+
+test('computer sound: when the saved device is gone, another loopback device opens, not the microphone', { skip }, async () => {
+  const { page, context, errors } = await openRecorder(() => {
+    window.__audioInputs = [
+      { kind: 'audioinput', deviceId: 'mic', label: 'Microphone (USB)' },
+      { kind: 'audioinput', deviceId: 'cable', label: 'CABLE Output (VB-Audio Virtual Cable)' }
+    ];
+    window.__tones = { mic: 440, cable: 1200 };
+    Object.assign(window.__store, { 'setting.computerSound': true, 'setting.computerSoundDeviceId': 'stereo-mix-gone' });
+  });
+  await page.waitForFunction(() => computerSound.stream);
+  assert.deepEqual((await micRequests(page)).map((c) => c.audio.deviceId), [{ exact: 'stereo-mix-gone' }, { exact: 'cable' }]);
+  assert.equal(await page.textContent('#computerHint'), 'Play a sound on the computer. The bar moves when the device hears it.');
+  assert.deepEqual(errors, []);
+  await context.close();
+});
+
+test('computer sound: a device that is not a loopback device gives a warning, also without the microphone', { skip }, async () => {
+  const { page, context } = await openRecorder();
+  await page.check('#computerCheck');
+  await page.waitForFunction(() => document.getElementById('computerHint').classList.contains('warn'), null, { timeout: 5000 });
+  assert.equal(await page.textContent('#computerHint'), 'This device does not look like a loopback device. If it is a ' +
+    'microphone, choose your loopback device (for example, Stereo Mix) in the list.');
   await context.close();
 });
 

@@ -317,7 +317,7 @@ const SILENCE_HINT_MS = 3000;
 // Names of loopback devices, which record the sound that the computer
 // plays: Stereo Mix on Windows (also in some other languages), virtual
 // cables, BlackHole and Soundflower on macOS, and monitors on Linux.
-const LOOPBACK_NAMES = /stereo ?mix|mixage st|mezcla est|missaggio|what u hear|wave ?out mix|loopback|cable output|voicemeeter|blackhole|soundflower|monitor of/i;
+const LOOPBACK_NAMES = /stereo ?mix|mixage st|mezcla est|missaggio|what u hear|wave ?out mix|loopback|cable output|virtual audio|vb-audio|voicemeeter|blackhole|soundflower|monitor of/i;
 const BLOCK_HELP = 'If Firefox does not ask, click the microphone icon in the address bar, remove the block, then ' +
   'reload this page.';
 
@@ -370,9 +370,10 @@ const computerSound = {
   deviceSetting: 'computerSoundDeviceId',
   // The computer sound is not a voice: no voice filters, and stereo.
   constraints: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: { ideal: 2 } },
-  // Without a saved device, use the first loopback device. The right
-  // device is rarely the default one, so the list always shows.
-  findDevice: (devices) => devices.find((device) => LOOPBACK_NAMES.test(device.label)),
+  // Loopback devices have these names. Without a saved device, the first
+  // one opens. The right device is rarely the default one, so the list
+  // always shows.
+  deviceNames: LOOPBACK_NAMES,
   alwaysShowDevices: true,
   texts: {
     deviceName: 'Sound input',
@@ -381,6 +382,8 @@ const computerSound = {
       'loopback device (for example, Stereo Mix) in the list.',
     sameDevice: 'This is the device of your microphone. Choose your loopback device (for example, Stereo Mix) in ' +
       'the list.',
+    notLoopback: 'This device does not look like a loopback device. If it is a microphone, choose your loopback ' +
+      'device (for example, Stereo Mix) in the list.',
     noMeter: 'The level meter is not available. The computer sound records.',
     notAllowed: 'Firefox did not allow the sound device. To record the computer sound, tick "Include computer ' +
       `sound" and allow the device. ${BLOCK_HELP}`,
@@ -416,21 +419,30 @@ async function openSoundInput(input, request, deviceId) {
   const open = (id) => navigator.mediaDevices.getUserMedia({
     audio: id ? { ...input.constraints, deviceId: { exact: id } } : input.constraints
   });
+  // The first device with a name of this input (a loopback device for the
+  // computer sound), or '' for the default device. Device names show only
+  // after permission is given. Without a name that matches, Firefox lets
+  // you choose the device when it asks.
+  const namedDevice = async () => {
+    if (!input.deviceNames) return '';
+    const found = (await audioInputDevices()).find((device) => input.deviceNames.test(device.label));
+    return found ? found.deviceId : '';
+  };
   let stream;
   try {
-    if (!deviceId && input.findDevice) {
-      // Device names show only after permission is given. Without a name
-      // that matches, Firefox lets you choose the device when it asks.
-      const found = input.findDevice(await audioInputDevices());
+    if (!deviceId) {
+      deviceId = await namedDevice();
       if (request !== input.request) return;
-      deviceId = found ? found.deviceId : '';
     }
     try {
       stream = await open(deviceId);
     } catch (error) {
       if (!deviceId || error.name !== 'OverconstrainedError') throw error;
-      // The saved device is gone. Use the default device.
-      stream = await open('');
+      // The saved device is gone. Use another device with a matching name
+      // (not the microphone for the computer sound), else the default one.
+      const other = await namedDevice();
+      if (request !== input.request) return;
+      stream = await open(other === deviceId ? '' : other);
     }
   } catch (error) {
     if (request !== input.request) return;
@@ -488,10 +500,15 @@ async function audioInputDevices() {
   return (await navigator.mediaDevices.enumerateDevices()).filter((device) => device.kind === 'audioinput');
 }
 
-// The device of an open input, if the browser tells it.
+// The device of an open input and its name, if the browser tells them.
 function soundInputDeviceId(input) {
   const track = input.stream && input.stream.getAudioTracks()[0];
   return track ? track.getSettings().deviceId : undefined;
+}
+
+function soundInputLabel(input) {
+  const track = input.stream && input.stream.getAudioTracks()[0];
+  return track ? track.label : '';
 }
 
 // Device names show only after permission is given.
@@ -590,10 +607,15 @@ function updateMeter(input) {
 function setHint(input, silent) {
   let text = silent ? input.texts.silentHint : input.texts.hint;
   let warn = silent;
-  // The computer sound needs another device than the microphone.
+  // The computer sound needs a loopback device, not the microphone. This
+  // shows also when the microphone is not open.
   const device = soundInputDeviceId(input);
+  const label = soundInputLabel(input);
   if (input.texts.sameDevice && device && device === soundInputDeviceId(microphone)) {
     text = input.texts.sameDevice;
+    warn = true;
+  } else if (input.deviceNames && label && !input.deviceNames.test(label)) {
+    text = input.texts.notLoopback;
     warn = true;
   }
   if (input.ui.hint.textContent !== text) input.ui.hint.textContent = text;
