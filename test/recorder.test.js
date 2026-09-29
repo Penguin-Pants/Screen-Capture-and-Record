@@ -277,6 +277,32 @@ test('a save counts only when the download is complete', { skip }, async () => {
   await context.close();
 });
 
+test('without the camera, Save does not wait for the export check', { skip }, async () => {
+  const { page, context, errors } = await openRecorder();
+  // "Save at once" is on, and the check is slow: the export library loads 1.5 s late.
+  await page.evaluate(() => {
+    saveSettings({ afterRecording: 'save' });
+    const load = loadMediabunny;
+    loadMediabunny = () => new Promise((resolve) => setTimeout(resolve, 1500)).then(load);
+  });
+  await page.click('#startBtn');
+  await page.waitForFunction(() => document.getElementById('live').classList.contains('active'));
+  await page.waitForTimeout(1200);
+  await page.click('#stopBtn');
+  await page.waitForFunction(() => document.getElementById('result').classList.contains('active'));
+
+  assert.equal(await page.textContent('#exportNote'), 'Checking which formats this browser can make...');
+  assert.equal(await page.isDisabled('#saveBtn'), false, 'Save works during the check');
+  await page.click('#saveBtn');
+  await page.waitForFunction(() => document.getElementById('saved').classList.contains('show'), null, { timeout: 30000 });
+  // After the check, "Save at once" does not save a second copy.
+  await page.waitForFunction(() => document.getElementById('exportNote').textContent.startsWith('Sizes are estimates'));
+  await page.waitForTimeout(500);
+  assert.equal(await page.evaluate(() => window.__calls.downloads.length), 1);
+  assert.deepEqual(errors, []);
+  await context.close();
+});
+
 test('cancel stops an export and saves nothing', { skip }, async () => {
   const { page, context } = await openRecorder();
   await record(page, 1500);
@@ -487,6 +513,28 @@ test('camera: Save waits for the export check, so the camera is not left out', {
 
   await page.waitForFunction(() => !document.getElementById('saveBtn').disabled);
   assert.match(await page.$eval('#presets .preset', (label) => label.textContent), /^Full size/);
+  assert.deepEqual(errors, []);
+  await context.close();
+});
+
+test('camera: a check that never ends stops the wait; the screen recording can be saved', { skip }, async () => {
+  const { page, context, errors } = await openRecorder();
+  await page.check('#cameraCheck');
+  await page.waitForFunction(() => document.getElementById('cameraSetup').classList.contains('show'));
+  // The encoder check never answers. Here the review stops waiting after 500 ms.
+  await page.evaluate(() => {
+    exportCheckLimitMs = 500;
+    const load = loadMediabunny;
+    loadMediabunny = () => load().then((mb) => ({ ...mb, getFirstEncodableVideoCodec: () => new Promise(() => {}) }));
+  });
+  await record(page, 1200);
+
+  assert.equal(await page.textContent('#exportNote'),
+    'The format check did not finish, so the camera cannot be added. You can save the screen recording as it is.');
+  assert.match(await page.$eval('#presets .preset', (label) => label.textContent), /^As recorded/);
+  assert.equal(await page.isDisabled('#saveBtn'), false);
+  await page.click('#saveBtn');
+  await page.waitForFunction(() => document.getElementById('saved').classList.contains('show'), null, { timeout: 30000 });
   assert.deepEqual(errors, []);
   await context.close();
 });

@@ -8,7 +8,8 @@ let recorderTabId = null;
 // The recorder tab this page opened last: { id, openedAt }. While its page
 // loads, a click shows this tab instead of opening a second recorder.
 let openedRecorder = null;
-// Just after a tab opens, its page does not exist yet (see showOrOpenRecorder).
+// Just after a tab opens, its page does not exist yet: a click waits up to
+// this long for it (see showOrOpenRecorder).
 const OPENING_MS = 1000;
 // Toolbar clicks are handled one after the other (see openRecorder).
 let openQueue = Promise.resolve();
@@ -42,6 +43,7 @@ function openRecorder() {
 }
 
 const isRecorderView = (view) => view.location.pathname.endsWith(`/${RECORDER_PAGE}`);
+const hasRecorderPage = (tabId) => browser.extension.getViews({ type: 'tab', tabId }).some(isRecorderView);
 
 // extension.getViews() lists only live pages of this extension, so a tab
 // that navigated away is never picked.
@@ -52,14 +54,17 @@ async function showOrOpenRecorder() {
     return;
   }
   // No recorder page can show itself yet. Show the tab this page opened, but
-  // only while it has the recorder page (still loading), or just after it
-  // opened, before the page exists. A tab that left the page is not used.
+  // only when it has the recorder page (still loading). Just after the tab
+  // opened, the page may not exist yet, so wait for it a moment. A tab that
+  // left the page is not used.
   if (openedRecorder) {
     const { id, openedAt } = openedRecorder;
-    const hasRecorder = browser.extension.getViews({ type: 'tab', tabId: id }).some(isRecorderView);
-    const tab = hasRecorder || Date.now() - openedAt < OPENING_MS
-      ? await browser.tabs.update(id, { active: true }).catch(() => null)
-      : null;
+    let hasRecorder = hasRecorderPage(id);
+    while (!hasRecorder && Date.now() < openedAt + OPENING_MS) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      hasRecorder = hasRecorderPage(id);
+    }
+    const tab = hasRecorder ? await browser.tabs.update(id, { active: true }).catch(() => null) : null;
     if (tab) {
       await browser.windows.update(tab.windowId, { focused: true });
       return;

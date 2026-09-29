@@ -95,45 +95,60 @@ test('fast toolbar clicks open one recorder; a click while it loads shows that t
   await page.addScriptTag({ path: path.join(SRC, 'background.js') });
   const result = await page.evaluate(async () => {
     let nextId = 100;
+    // A new tab gets its recorder page 20 ms after it opens, unless it goes to
+    // another page first (window.__leavesAtOnce).
     browser.tabs.create = async (options) => {
       window.__calls.tabsCreated.push(options);
-      return { id: nextId++ };
+      const id = nextId++;
+      if (!window.__leavesAtOnce) {
+        setTimeout(() => window.__views.push({ __tabId: id, location: { pathname: '/recorder.html' } }), 20);
+      }
+      return { id };
     };
     const state = () => ({
       created: window.__calls.tabsCreated.length,
       shown: window.__calls.tabsUpdated.map((update) => update.id)
     });
 
-    // Fast clicks: one tab (100). The other clicks show it; its page does not exist yet.
+    // Fast clicks: one tab (100). The other clicks wait for its page, then show the tab.
     const click = browser.browserAction.onClicked.listeners[0];
     click();
     click();
     await openRecorder(); // a third click, handled after the first two
     const fast = state();
+    await new Promise((resolve) => setTimeout(resolve, 50)); // tab 100 has its page now
 
     // 5 s later, tab 100 still loads the recorder page: a click shows it.
     const now = Date.now;
     Date.now = () => now() + 5000;
-    const loading = { __tabId: 100, location: { pathname: '/recorder.html' } };
-    window.__views.push(loading);
     await openRecorder();
     const stillLoading = state();
 
     // Tab 100 left the recorder page before it loaded: a click opens a new recorder (101).
-    window.__views.splice(window.__views.indexOf(loading), 1);
+    window.__views.splice(window.__views.findIndex((view) => view.__tabId === 100), 1);
+    window.__leavesAtOnce = true;
     await openRecorder();
     const left = state();
 
-    // The recorder page in tab 101 is ready: the page itself comes to the front.
-    let focused = 0;
-    window.__views.push({ __tabId: 101, location: { pathname: '/recorder.html' }, focusRecorder: async () => { focused++; } });
+    // Tab 101 went to another page before its recorder page existed. A click in
+    // its first second does not show it: it opens a new recorder (102).
+    window.__leavesAtOnce = false;
     await openRecorder();
-    return { fast, stillLoading, left, ready: state(), focused };
+    const leftAtOnce = state();
+
+    // The recorder page in tab 102 is ready: the page itself comes to the front.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    let focused = 0;
+    const ready = window.__views.find((view) => view.__tabId === 102);
+    if (ready) ready.focusRecorder = async () => { focused++; };
+    await openRecorder();
+    return { fast, stillLoading, left, leftAtOnce, ready: state(), focused };
   });
   assert.deepEqual(result.fast, { created: 1, shown: [100, 100] }, 'one recorder tab');
   assert.deepEqual(result.stillLoading, { created: 1, shown: [100, 100, 100] });
   assert.deepEqual(result.left, { created: 2, shown: [100, 100, 100] }, 'a tab that left the page is not shown');
-  assert.deepEqual(result.ready, result.left);
+  assert.deepEqual(result.leftAtOnce, { created: 3, shown: [100, 100, 100] }, 'not even in its first second');
+  assert.deepEqual(result.ready, result.leftAtOnce);
   assert.equal(result.focused, 1);
   assert.deepEqual(errors, []);
   await context.close();

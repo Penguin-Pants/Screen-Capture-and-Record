@@ -87,6 +87,7 @@ let conversion = null;      // The running Mediabunny conversion, for Cancel
 let saving = false;         // A save (export, then download) is running
 let cancelRequested = false;
 let mediabunnyPromise = null;
+let exportCheckLimitMs = 15000; // The longest wait for the codec check (tests make it shorter)
 
 function showMessage(text, type = 'info') {
   ui.message.textContent = text;
@@ -608,11 +609,17 @@ async function finishRecording() {
   setView('result');
 
   const current = recording;
-  exportSupport = await detectExportSupport(current);
+  // A codec check can stay without an answer. Then the review stops waiting
+  // for it, and the recording can be saved as it is.
+  exportSupport = await Promise.race([
+    detectExportSupport(current),
+    new Promise((resolve) => setTimeout(resolve, exportCheckLimitMs, { library: true, formats: [], timedOut: true }))
+  ]);
   if (recording !== current) return; // A new recording started meanwhile.
   renderReview(settings);
 
-  if (settings.afterRecording === 'save') {
+  // Without the camera, you can save during the check. Then no second copy.
+  if (settings.afterRecording === 'save' && !current.saved) {
     if (!exportChoices()[0].enabled) {
       showMessage('This browser cannot make the video with your camera at full size. Choose a smaller size, then click Save.', 'info');
       return;
@@ -805,13 +812,17 @@ function renderReview(settings) {
     return label;
   }));
 
-  // Save waits for the check: until then the choices are not final, and
-  // "As recorded" would save a camera recording without the camera.
-  ui.save.disabled = saving || exportSupport === null;
+  // With the camera, Save waits for the check: until then the choices are
+  // not final, and "As recorded" would save the recording without the camera.
+  ui.save.disabled = saving || (exportSupport === null && Boolean(rec.camera));
   if (exportSupport === null) {
     ui.exportNote.textContent = 'Checking which formats this browser can make...';
   } else if (!exportSupport.library) {
     ui.exportNote.textContent = 'The export tool could not load. You can save the recording as it is.';
+  } else if (exportSupport.timedOut) {
+    ui.exportNote.textContent = rec.camera
+      ? 'The format check did not finish, so the camera cannot be added. You can save the screen recording as it is.'
+      : 'The format check did not finish. You can save the recording as it is.';
   } else if (exportSupport.formats.length === 0) {
     ui.exportNote.textContent = rec.camera
       ? 'Adding the camera and smaller copies need Firefox 130 or later. You can save the screen recording as it is.'
@@ -1005,7 +1016,7 @@ async function remuxRecording() {
 }
 
 async function saveRecording(choiceId = selectedChoiceId()) {
-  if (!recording || saving || exportSupport === null) return;
+  if (!recording || saving || (exportSupport === null && recording.camera)) return;
   const rec = recording;
   const choice = exportChoices().find((item) => item.id === choiceId);
   if (!choice || !choice.enabled) return;
