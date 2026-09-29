@@ -13,11 +13,15 @@ let currentColor = '#ff0000';
 let currentSize = 5;
 // Undo history: snapshots of { base canvas, floating layers }.
 // Canvas copies are fast to make and restore, unlike PNG data URLs.
-const HISTORY_MAX_STATES = 50;
-const HISTORY_MAX_BYTES = 512 * 1024 * 1024;
+// A very large image keeps fewer undo steps (down to none) to stay
+// inside the memory budget.
+const HISTORY_LIMITS = { states: 50, bytes: 512 * 1024 * 1024 };
 let history = [];
 let historyStep = -1;
-let originalState = null;
+// Source of the original image for Revert: { url } (compressed data URL)
+// or { width, height } for a new blank canvas. This avoids a third
+// full-size canvas copy for large captures.
+let originalSource = null;
 let documentName = `edited-${fileTimestamp()}`;
 let tempCanvas = null;
 // Image layers float over layerBase until another tool merges them.
@@ -93,13 +97,30 @@ function createNewCanvas() {
     return;
   }
   
-  canvas.width = w;
-  canvas.height = h;
-  ctx.fillStyle = 'white';
-  ctx.fillRect(0, 0, w, h);
-  
+  const source = { width: w, height: h };
+  drawSource(source);
+  originalSource = source;
   startDocument(`image-${fileTimestamp()}`);
   showStatus(`New ${w}×${h}px canvas created`);
+}
+
+// Draw an original image source on the canvas (see originalSource).
+// An ImageBitmap is closed at once, so the decoded copy does not stay
+// in memory next to the canvas.
+async function drawSource(source) {
+  if (!source.url) {
+    canvas.width = source.width;
+    canvas.height = source.height;
+    ctx.fillStyle = 'white';
+    ctx.fillRect(0, 0, source.width, source.height);
+    return;
+  }
+  const bitmap = await createImageBitmap(await dataUrlToBlob(source.url));
+  canvas.width = bitmap.width;
+  canvas.height = bitmap.height;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(bitmap, 0, 0);
+  bitmap.close();
 }
 
 // Reset history and layers for a new image that is already on the canvas.
@@ -112,7 +133,6 @@ function startDocument(name) {
   history = [];
   historyStep = -1;
   zoomLevel = null;
-  originalState = snapshot();
   saveState();
 }
 
@@ -187,25 +207,17 @@ function loadImage(file) {
   const reader = new FileReader();
   reader.onload = (e) => {
     loadImageUrl(e.target.result, baseName ? `${baseName}-edited` : `image-${fileTimestamp()}`)
-      .then(() => showStatus('Image loaded'));
+      .then(() => showStatus('Image loaded'))
+      .catch(() => showStatus('The image could not be opened.'));
   };
   reader.readAsDataURL(file);
 }
 
-function loadImageUrl(url, name) {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => {
-      canvas.width = img.width;
-      canvas.height = img.height;
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      ctx.drawImage(img, 0, 0);
-      startDocument(name);
-      resolve();
-    };
-    img.onerror = () => reject(new Error('The image could not be loaded.'));
-    img.src = url;
-  });
+async function loadImageUrl(url, name) {
+  const source = { url };
+  await drawSource(source);
+  originalSource = source;
+  startDocument(name);
 }
 
 // Open a capture that the background page sent: editor.html?capture=<id>
@@ -590,6 +602,13 @@ canvas.addEventListener('mouseup', (e) => {
 });
 
 canvas.addEventListener('mouseleave', () => {
+  // A layer drag that leaves the canvas ends here, so record it in the
+  // history (the mouseup outside the canvas never reaches this canvas).
+  if (isDraggingLayer) {
+    isDraggingLayer = false;
+    selectedLayer = null;
+    saveState();
+  }
   if (isDrawing) {
     if (currentTool === 'eraser') {
       ctx.globalCompositeOperation = 'source-over';
@@ -605,7 +624,6 @@ canvas.addEventListener('mouseleave', () => {
     }
   }
   isDrawing = false;
-  isDraggingLayer = false;
   if (sizeIndicator) sizeIndicator.style.display = 'none';
 });
 
@@ -840,10 +858,10 @@ function resizeCanvas(width, height) {
   temp.height = canvas.height;
   temp.getContext('2d').drawImage(canvas, 0, 0);
   
+  // A resized canvas starts transparent, so alpha is kept. JPEG export
+  // adds the white background.
   canvas.width = width;
   canvas.height = height;
-  ctx.fillStyle = 'white';
-  ctx.fillRect(0, 0, width, height);
   ctx.drawImage(temp, 0, 0, width, height);
   
   saveState();
@@ -966,6 +984,8 @@ if (btnSaturate) {
 
 let currentSliderCallback = null;
 let originalImageData = null;
+// Layers before an adjustment, restored when the adjustment is cancelled.
+let layersBeforeAdjust = null;
 
 function showSliderModal(title, min, max, initial, callback) {
   const modal = document.getElementById('sliderModal');
@@ -976,6 +996,7 @@ function showSliderModal(title, min, max, initial, callback) {
   
   if (!modal || !backdrop) return;
   
+  layersBeforeAdjust = { layers, layerBase };
   flattenLayers();
   originalImageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
   
@@ -1005,6 +1026,11 @@ function closeSliderModal(apply) {
   
   if (!apply && originalImageData) {
     ctx.putImageData(originalImageData, 0, 0);
+    // The image looks the same as before, so the layers stay movable.
+    if (layersBeforeAdjust) {
+      layers = layersBeforeAdjust.layers;
+      layerBase = layersBeforeAdjust.layerBase;
+    }
   } else if (apply) {
     saveState();
   }
@@ -1013,6 +1039,12 @@ function closeSliderModal(apply) {
   backdrop.classList.remove('active');
   currentSliderCallback = null;
   originalImageData = null;
+  layersBeforeAdjust = null;
+}
+
+function isSliderModalOpen() {
+  const modal = document.getElementById('sliderModal');
+  return Boolean(modal && modal.classList.contains('active'));
 }
 
 const btnApplyAdjust = document.getElementById('btnApplyAdjust');
@@ -1371,7 +1403,8 @@ function removeBackground(tolerance) {
       const dr = pixels[i] - bgR;
       const dg = pixels[i + 1] - bgG;
       const db = pixels[i + 2] - bgB;
-      if (dr * dr + dg * dg + db * db >= toleranceSq) continue;
+      // Tolerance 0 removes only the exact background color.
+      if (dr * dr + dg * dg + db * db > toleranceSq) continue;
       
       removed[index] = 1;
       const x = index % width;
@@ -1454,9 +1487,16 @@ function closeTextModal() {
   pendingTextPosition = null;
 }
 
+// The backdrop is shared: a click cancels whichever dialog is open.
 const modalBackdrop = document.getElementById('modalBackdrop');
 if (modalBackdrop) {
-  modalBackdrop.addEventListener('click', closeTextModal);
+  modalBackdrop.addEventListener('click', () => {
+    if (isSliderModalOpen()) {
+      closeSliderModal(false);
+    } else {
+      closeTextModal();
+    }
+  });
 }
 
 const textInput = document.getElementById('textInput');
@@ -1497,11 +1537,14 @@ function saveState() {
   history.push(snapshot());
   historyStep = history.length - 1;
 
+  // Keep the current state always. Drop the oldest states when over the
+  // limits, so memory stays bounded even for very large images.
   let bytes = history.reduce((sum, state) => sum + stateBytes(state), 0);
-  while (history.length > 2 && (history.length > HISTORY_MAX_STATES || bytes > HISTORY_MAX_BYTES)) {
+  while (history.length > 1 && (history.length > HISTORY_LIMITS.states || bytes > HISTORY_LIMITS.bytes)) {
     bytes -= stateBytes(history.shift());
     historyStep--;
   }
+  updateHistoryButtons();
   applyZoom();
 }
 
@@ -1509,6 +1552,7 @@ function undo() {
   if (historyStep > 0) {
     historyStep--;
     applySnapshot(history[historyStep]);
+    updateHistoryButtons();
     showStatus('Undo');
   }
 }
@@ -1517,6 +1561,7 @@ function redo() {
   if (historyStep < history.length - 1) {
     historyStep++;
     applySnapshot(history[historyStep]);
+    updateHistoryButtons();
     showStatus('Redo');
   }
 }
@@ -1526,7 +1571,24 @@ const btnRedo = document.getElementById('btnRedo');
 if (btnUndo) btnUndo.addEventListener('click', undo);
 if (btnRedo) btnRedo.addEventListener('click', redo);
 
+function updateHistoryButtons() {
+  const tooLarge = history.length > 0 && stateBytes(history[0]) * 2 > HISTORY_LIMITS.bytes;
+  if (btnUndo) {
+    btnUndo.disabled = historyStep <= 0;
+    btnUndo.title = tooLarge
+      ? 'Undo is not available: this image is too large to keep copies in memory'
+      : 'Undo (Ctrl+Z)';
+  }
+  if (btnRedo) btnRedo.disabled = historyStep >= history.length - 1;
+}
+
+updateHistoryButtons();
+
 document.addEventListener('keydown', (e) => {
+  if (isSliderModalOpen()) {
+    if (e.key === 'Escape') closeSliderModal(false);
+    return;
+  }
   if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
   if (e.target.tagName === 'INPUT') return;
   const key = e.key.toLowerCase();
@@ -1548,12 +1610,15 @@ document.addEventListener('keydown', (e) => {
 const btnClear = document.getElementById('btnClear');
 if (btnClear) {
   btnClear.addEventListener('click', () => {
-    if (!originalState) return;
-    if (confirm('Revert to the original image? You can undo this.')) {
-      applySnapshot(originalState);
+    if (!originalSource) return;
+    if (!confirm('Revert to the original image? You can undo this.')) return;
+    const source = originalSource;
+    drawSource(source).then(() => {
+      if (source !== originalSource) return; // Another image was opened.
+      flattenLayers();
       saveState();
       showStatus('Reverted to the original image');
-    }
+    }).catch(() => showStatus('Could not revert to the original image.'));
   });
 }
 

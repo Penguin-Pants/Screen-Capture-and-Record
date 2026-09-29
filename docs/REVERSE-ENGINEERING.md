@@ -186,7 +186,7 @@ The signed XPI also gave `ALREADY_SIGNED`. This goes away because `src/` has no 
 | 17 | Blur is pixelate | Fixed. Gaussian blur. |
 | 18 | Custom rotation clips | Fixed. |
 | 19 | No capture-to-editor path | Fixed. Editor is the default after-capture action. |
-| 20 | History memory | Improved. Canvas copies with a 512 MB limit. |
+| 20 | History memory | Improved. Canvas copies inside a 512 MB budget (very large images keep fewer undo steps). Revert decodes the compressed original instead of keeping a full-size copy. |
 | 21 | `prompt`, `confirm`, `alert` | Open (some remain in the editor). |
 | 22 | False feature claims | Fixed. New settings page. |
 | 23 | Donation links | Removed. |

@@ -283,6 +283,11 @@ async function saveRecording() {
   if (previewUrl) URL.revokeObjectURL(previewUrl);
   previewUrl = URL.createObjectURL(blob);
   ui.preview.src = previewUrl;
+  // Forget the previous file before the new one is saved, so "Show file"
+  // never opens an older recording while the save is pending.
+  lastDownloadId = null;
+  ui.showFile.disabled = true;
+  ui.resultMeta.textContent = 'Saving...';
   setView('result');
 
   const settings = await getSettings();

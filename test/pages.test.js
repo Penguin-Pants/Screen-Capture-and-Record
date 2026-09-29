@@ -235,7 +235,8 @@ test('revert restores the original image and can be undone', { skip }, async () 
   const { page, context } = await openEditorWithCapture();
   await page.evaluate(() => { rotateCanvas(90); window.confirm = () => true; });
   await page.click('#btnClear');
-  assert.deepEqual(await page.evaluate(() => [canvas.width, canvas.height]), [400, 300]);
+  await page.waitForFunction(() => canvas.width === 400 && canvas.height === 300 && history.length === 3);
+  assert.deepEqual(await pixel(page, 10, 10), [255, 0, 0, 255], 'original pixels are back');
   await page.click('#btnUndo');
   assert.deepEqual(await page.evaluate(() => [canvas.width, canvas.height]), [300, 400]);
   await context.close();
@@ -454,5 +455,166 @@ test('full-page capture restores the scroll position when a step fails', { skip 
   });
   assert.equal(result.message, 'lazy pass failed');
   assert.match(result.last, /top: 777/);
+  await context.close();
+});
+
+test('remove background with tolerance 0 removes the exact background color', { skip }, async () => {
+  const { page, context } = await openEditorWithCapture();
+  const alpha = await page.evaluate(() => {
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, 400, 300);
+    ctx.fillStyle = '#ff0000';
+    ctx.fillRect(100, 100, 100, 100);
+    removeBackground(0);
+    return [ctx.getImageData(10, 10, 1, 1).data[3], ctx.getImageData(150, 150, 1, 1).data[3]];
+  });
+  assert.deepEqual(alpha, [0, 255]);
+  await context.close();
+});
+
+test('undo history stays inside the memory budget', { skip }, async () => {
+  const { page, context } = await openEditorWithCapture();
+  const stateBytes = 400 * 300 * 4;
+  // Room for two states: one undo step.
+  await page.evaluate((bytes) => { HISTORY_LIMITS.bytes = bytes; }, stateBytes * 2.5);
+  await page.evaluate(() => { applyGrayscale(); applyInvert(); applySepia(); });
+  let info = await page.evaluate(() => ({ length: history.length, step: historyStep, undo: btnUndo.disabled }));
+  assert.deepEqual(info, { length: 2, step: 1, undo: false });
+
+  // Room for less than two states: no undo, and the button says why.
+  await page.evaluate((bytes) => { HISTORY_LIMITS.bytes = bytes; }, stateBytes * 1.5);
+  await page.evaluate(() => applyInvert());
+  info = await page.evaluate(() => ({ length: history.length, undo: btnUndo.disabled, title: btnUndo.title }));
+  assert.equal(info.length, 1);
+  assert.equal(info.undo, true);
+  assert.match(info.title, /too large/);
+  await context.close();
+});
+
+test('cancelling an adjustment keeps layers movable', { skip }, async () => {
+  const { page, context } = await openEditorWithCapture();
+  await addGreenLayer(page);
+  await page.click('#btnBrightness');
+  await page.evaluate(() => {
+    const slider = document.getElementById('adjustSlider');
+    slider.value = '80';
+    slider.dispatchEvent(new Event('input'));
+  });
+  await page.click('#btnCancelAdjust');
+  assert.equal(await page.evaluate(() => layers.length), 1);
+  assert.deepEqual(await pixel(page, 10, 10), [255, 0, 0, 255], 'preview is undone');
+  await page.click('#btnMove');
+  await drag(page, [200, 150], [300, 250]);
+  assert.deepEqual(await pixel(page, 300, 250), [0, 255, 0, 255], 'layer still moves');
+  await context.close();
+});
+
+test('a backdrop click or Escape cancels the open adjustment', { skip }, async () => {
+  const { page, context } = await openEditorWithCapture();
+  const preview = async () => {
+    await page.click('#btnBrightness');
+    await page.evaluate(() => {
+      const slider = document.getElementById('adjustSlider');
+      slider.value = '-100';
+      slider.dispatchEvent(new Event('input'));
+    });
+  };
+  const state = () => page.evaluate(() => ({
+    slider: document.getElementById('sliderModal').classList.contains('active'),
+    backdrop: document.getElementById('modalBackdrop').classList.contains('active')
+  }));
+
+  await preview();
+  await page.click('#modalBackdrop', { position: { x: 5, y: 5 } });
+  assert.deepEqual(await state(), { slider: false, backdrop: false });
+  assert.deepEqual(await pixel(page, 10, 10), [255, 0, 0, 255]);
+
+  await preview();
+  await page.keyboard.press('Control+z');
+  assert.deepEqual(await state(), { slider: true, backdrop: true }, 'shortcuts are ignored while the dialog is open');
+  await page.keyboard.press('Escape');
+  assert.deepEqual(await state(), { slider: false, backdrop: false });
+  assert.deepEqual(await pixel(page, 10, 10), [255, 0, 0, 255]);
+  await context.close();
+});
+
+test('resize keeps transparent pixels transparent', { skip }, async () => {
+  const { page, context } = await openEditorWithCapture();
+  const alpha = await page.evaluate(() => {
+    ctx.clearRect(0, 0, 100, 100);
+    saveState();
+    resizeCanvas(200, 150);
+    return [ctx.getImageData(10, 10, 1, 1).data[3], ctx.getImageData(150, 100, 1, 1).data[3]];
+  });
+  assert.deepEqual(alpha, [0, 255]);
+  await context.close();
+});
+
+test('a layer drag that leaves the canvas is saved in the history', { skip }, async () => {
+  const { page, context } = await openEditorWithCapture();
+  await addGreenLayer(page);
+  await page.click('#btnMove');
+  const from = await canvasPoint(page, 200, 150);
+  const inside = await canvasPoint(page, 350, 150);
+  const box = await page.evaluate(() => canvas.getBoundingClientRect().toJSON());
+  await page.mouse.move(from.x, from.y);
+  await page.mouse.down();
+  await page.mouse.move(inside.x, inside.y, { steps: 5 });
+  await page.mouse.move(box.right + 40, inside.y, { steps: 5 });
+  await page.mouse.up();
+  const after = await page.evaluate(() => ({ length: history.length, x: layers[0].x }));
+  await page.click('#btnUndo');
+  const undone = await page.evaluate(() => ({ layers: layers.length, x: layers[0] && layers[0].x }));
+  assert.equal(undone.layers, 1, 'undo keeps the layer');
+  assert.equal(undone.x, 175, 'undo returns the layer to its first place');
+  assert.ok(after.x > 175);
+  await context.close();
+});
+
+test('background drops a capture when the editor tab cannot open', { skip }, async () => {
+  const { page, context, errors } = await openPage('options.html');
+  for (const file of ['capture.js', 'background.js']) {
+    await page.addScriptTag({ path: path.join(SRC, file) });
+  }
+  const result = await page.evaluate(async () => {
+    browser.tabs.create = async () => { throw new Error('No such window'); };
+    let message = '';
+    try {
+      await openInEditor(new Blob(['x'], { type: 'image/png' }), 'area-x', { id: 1, index: 0, windowId: 5 });
+    } catch (error) {
+      message = error.message;
+    }
+    return { message, size: captureStore.size };
+  });
+  assert.deepEqual(result, { message: 'No such window', size: 0 });
+  assert.deepEqual(errors, []);
+  await context.close();
+});
+
+test('recorder never shows the previous file while a new save is pending', { skip }, async () => {
+  const { page, context } = await openPage('recorder.html', '', fakeMedia);
+  await page.waitForFunction(() => document.getElementById('formatSelect').options.length > 0);
+  await page.selectOption('#countdownSelect', '0');
+  const record = async () => {
+    await page.click('#startBtn');
+    await page.waitForFunction(() => document.getElementById('live').classList.contains('active'));
+    await page.waitForTimeout(1100);
+    await page.click('#stopBtn');
+    await page.waitForFunction(() => document.getElementById('result').classList.contains('active'));
+  };
+
+  await record();
+  await page.waitForFunction(() => lastDownloadId === 1 && !document.getElementById('showFileBtn').disabled);
+
+  // The second save stays pending, like an open "Save as" dialog.
+  await page.evaluate(() => { browser.downloads.download = () => new Promise(() => {}); });
+  await page.click('#againBtn');
+  await record();
+  const state = await page.evaluate(() => ({
+    id: lastDownloadId,
+    disabled: document.getElementById('showFileBtn').disabled,
+    meta: document.getElementById('resultMeta').textContent
+  }));
+  assert.deepEqual(state, { id: null, disabled: true, meta: 'Saving...' });
   await context.close();
 });

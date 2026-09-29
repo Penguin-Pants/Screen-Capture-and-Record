@@ -23,7 +23,12 @@
     return canvas.toDataURL('image/png');
   };
 
+  // Event objects that only record listeners (enough to load background.js).
+  const event = () => ({ addListener() {}, removeListener() {} });
+
   window.browser = {
+    browserAction: { setBadgeText() {}, setBadgeBackgroundColor() {} },
+    notifications: { create: async () => 'n1', onClicked: event(), onClosed: event() },
     storage: {
       local: {
         async get(keys) {
@@ -46,7 +51,8 @@
         }
         return { ok: true };
       },
-      openOptionsPage: async () => calls.messages.push({ action: 'openOptionsPage' })
+      openOptionsPage: async () => calls.messages.push({ action: 'openOptionsPage' }),
+      onMessage: event()
     },
     downloads: {
       async download(options) {
@@ -73,9 +79,11 @@
       create: async (options) => {
         calls.tabsCreated.push(options);
         return { id: 99 };
-      }
+      },
+      onRemoved: event()
     },
     commands: {
+      onCommand: event(),
       getAll: async () => [
         { name: 'capture-area', description: 'Capture a selected area', shortcut: 'Alt+Shift+A' },
         { name: 'capture-visible', description: 'Capture the visible area', shortcut: 'Alt+Shift+S' },

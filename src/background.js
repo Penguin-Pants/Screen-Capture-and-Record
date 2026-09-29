@@ -139,12 +139,19 @@ async function openInEditor(blob, name, tab) {
   sweepCaptureStore();
   const id = crypto.randomUUID();
   captureStore.set(id, { blob, name, created: Date.now(), editorTabId: null });
-  const created = await browser.tabs.create({
-    url: `${EDITOR_URL}?capture=${id}`,
-    windowId: tab.windowId,
-    index: tab.index + 1,
-    openerTabId: tab.id
-  });
+  let created;
+  try {
+    created = await browser.tabs.create({
+      url: `${EDITOR_URL}?capture=${id}`,
+      windowId: tab.windowId,
+      index: tab.index + 1,
+      openerTabId: tab.id
+    });
+  } catch (error) {
+    // No editor tab will ask for this capture, so do not keep the image.
+    captureStore.delete(id);
+    throw error;
+  }
   const entry = captureStore.get(id);
   if (entry) entry.editorTabId = created.id;
 }
