@@ -33,7 +33,8 @@
       setBadgeBackgroundColor: () => {}
     },
     extension: {
-      getViews: () => window.__views
+      // A fake view can name its tab in __tabId.
+      getViews: (filter = {}) => window.__views.filter((view) => filter.tabId === undefined || view.__tabId === filter.tabId)
     },
     storage: {
       local: {
@@ -58,12 +59,19 @@
       onMessage: event()
     },
     downloads: {
+      // Tests can make a download fail (window.__downloadError = 'FILE_NO_SPACE')
+      // or report its end before download() resolves (window.__downloadEndsFirst).
       async download(options) {
         const blob = await (await fetch(options.url)).blob();
         calls.downloads.push({ filename: options.filename, saveAs: options.saveAs, size: blob.size, type: blob.type });
         window.__downloadBlobs.push(blob);
         const id = calls.downloads.length;
-        setTimeout(() => downloadListeners.forEach((listener) => listener({ id, state: { current: 'complete' } })), 0);
+        const end = window.__downloadError
+          ? { id, state: { current: 'interrupted' }, error: { current: window.__downloadError } }
+          : { id, state: { current: 'complete' } };
+        const report = () => downloadListeners.forEach((listener) => listener(end));
+        if (window.__downloadEndsFirst) report();
+        else setTimeout(report, 0);
         return id;
       },
       onChanged: {

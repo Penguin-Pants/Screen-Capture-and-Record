@@ -247,6 +247,36 @@ test('a smaller copy uses the preset size and is smaller than the recording', { 
   await context.close();
 });
 
+test('a save counts only when the download is complete', { skip }, async () => {
+  const { page, context, errors } = await openRecorder();
+  await record(page, 1200);
+  const saveEnds = () => page.waitForFunction(() => !document.getElementById('saveBtn').disabled &&
+    document.getElementById('message').classList.contains('show'));
+
+  // The disk is full: the download stops.
+  await page.evaluate(() => { window.__downloadError = 'FILE_NO_SPACE'; });
+  await page.click('#saveBtn');
+  await saveEnds();
+  assert.equal(await page.textContent('#message'), 'Could not save the video: Firefox could not write the file (FILE_NO_SPACE).');
+  assert.equal(await page.evaluate(() => recording.saved), false, 'the warning before closing stays on');
+  assert.equal(await page.isVisible('#saved'), false);
+
+  // Cancelled in the downloads panel: not saved, and no error.
+  await page.evaluate(() => { window.__downloadError = 'USER_CANCELED'; });
+  await page.click('#saveBtn');
+  await saveEnds();
+  assert.equal(await page.textContent('#message'), 'The file was not saved.');
+  assert.equal(await page.evaluate(() => recording.saved), false);
+
+  // The end is reported before download() gives the ID: the save still counts.
+  await page.evaluate(() => { window.__downloadError = ''; window.__downloadEndsFirst = true; });
+  await page.click('#saveBtn');
+  await page.waitForFunction(() => document.getElementById('saved').classList.contains('show'));
+  assert.equal(await page.evaluate(() => recording.saved), true);
+  assert.deepEqual(errors, []);
+  await context.close();
+});
+
 test('cancel stops an export and saves nothing', { skip }, async () => {
   const { page, context } = await openRecorder();
   await record(page, 1500);
@@ -430,6 +460,33 @@ test('camera: the saved video has the bubble in the chosen corner', { skip }, as
   await page.waitForFunction(() => window.__calls.downloads.length === 3, null, { timeout: 60000 });
   assert.ok(!isGreen(await pixelAt(page, 2, 1, ...center)));
   assert.equal(await page.evaluate(() => window.__store['setting.cameraPosition']), 'top-left', '"Hide" is not saved as the default');
+  assert.deepEqual(errors, []);
+  await context.close();
+});
+
+test('camera: Save waits for the export check, so the camera is not left out', { skip }, async () => {
+  const { page, context, errors } = await openRecorder();
+  await page.check('#cameraCheck');
+  await page.waitForFunction(() => document.getElementById('cameraSetup').classList.contains('show'));
+  // A slow check: the export library loads 1.5 s late.
+  await page.evaluate(() => {
+    const load = loadMediabunny;
+    loadMediabunny = () => new Promise((resolve) => setTimeout(resolve, 1500)).then(load);
+  });
+  await page.click('#startBtn');
+  await page.waitForFunction(() => document.getElementById('live').classList.contains('active'));
+  await page.waitForTimeout(1200);
+  await page.click('#stopBtn');
+  await page.waitForFunction(() => document.getElementById('result').classList.contains('active'));
+
+  // While the check runs, "As recorded" (the screen only) is the only choice.
+  assert.equal(await page.textContent('#exportNote'), 'Checking which formats this browser can make...');
+  assert.equal(await page.isDisabled('#saveBtn'), true, 'Save waits for the check');
+  await page.evaluate(() => saveRecording('original'));
+  assert.equal(await page.evaluate(() => window.__calls.downloads.length), 0, 'nothing is saved during the check');
+
+  await page.waitForFunction(() => !document.getElementById('saveBtn').disabled);
+  assert.match(await page.$eval('#presets .preset', (label) => label.textContent), /^Full size/);
   assert.deepEqual(errors, []);
   await context.close();
 });
