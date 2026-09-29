@@ -656,6 +656,49 @@ test('microphone: a microphone that stops gives a warning', { skip }, async () =
   await context.close();
 });
 
+test('microphone: if it stops during the countdown, the recording uses the new microphone', { skip }, async () => {
+  // before: runs after the microphone is open, before it stops.
+  const countdownThenUnplug = async (page, before = async () => {}) => {
+    await page.check('#micCheck');
+    await page.waitForFunction(() => micStream);
+    await page.selectOption('#countdownSelect', '3');
+    await page.click('#startBtn');
+    await page.waitForFunction(() => document.getElementById('countdown').classList.contains('active'));
+    await before();
+    await page.evaluate(() => micStream.getAudioTracks()[0].dispatchEvent(new Event('ended')));
+  };
+  const { page, context, errors } = await openRecorder();
+  await countdownThenUnplug(page);
+  await page.waitForFunction(() => document.getElementById('live').classList.contains('active'), null, { timeout: 8000 });
+  assert.equal((await micRequests(page)).length, 2, 'the page opened the microphone again');
+  assert.equal(await page.evaluate(() => mediaRecorder.stream.getAudioTracks()[0] === micStream.getAudioTracks()[0]), true,
+    'the recording uses the new microphone');
+  await page.waitForTimeout(1200);
+  await page.click('#stopBtn');
+  await page.waitForFunction(() => document.getElementById('result').classList.contains('active'));
+  assert.ok((await soundLevel(page, 'recording')) > 0.3, 'the recording has the sound of the new microphone');
+  assert.doesNotMatch(await page.textContent('#details'), /sound|microphone/);
+  assert.deepEqual(errors, []);
+  await context.close();
+
+  // The new microphone is blocked: the page asks before it records without sound.
+  const second = await openRecorder();
+  let question = '';
+  second.page.once('dialog', (dialog) => {
+    question = dialog.message();
+    dialog.dismiss();
+  });
+  await countdownThenUnplug(second.page, () => second.page.evaluate(() => { window.__denyMic = true; }));
+  await second.page.waitForFunction(() => !document.getElementById('startBtn').disabled &&
+    !document.getElementById('countdown').classList.contains('active'), null, { timeout: 8000 });
+  assert.match(question, /^Firefox did not allow the microphone\.[\s\S]*\n\nRecord without sound\?$/);
+  assert.equal(await second.page.evaluate(() => document.getElementById('setup').style.display), '', 'back to the setup');
+  assert.equal(await second.page.evaluate(() =>
+    window.__calls.messages.filter((m) => m.action === 'recordingState').length), 0, 'nothing was recorded');
+  assert.equal(await liveTrackCount(second.page), 0, 'the screen is not shared any more');
+  await second.context.close();
+});
+
 test('microphone: without a level meter, the microphone still records and no warning shows', { skip }, async () => {
   const { page, context, errors } = await openRecorder(() => {
     // Firefox can refuse the meter, for example when two sample rates differ.

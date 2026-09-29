@@ -562,7 +562,17 @@ async function startRecording() {
   ui.start.disabled = true;
   // The click lets a suspended level meter start (autoplay rules).
   if (meter) meter.context.resume().catch(() => {});
-  const wantMicrophone = ui.mic.checked;
+  // The microphone is wanted until you agree to record without sound.
+  let wantMicrophone = ui.mic.checked;
+  // Waits for the answer to an open microphone request. Resolves false when
+  // the microphone failed and you do not want to record without sound.
+  const microphoneReady = async () => {
+    await ensureMicrophone();
+    if (!wantMicrophone || micStream || !micError) return true;
+    if (!window.confirm(`${microphoneErrorText(micError)}\n\nRecord without sound?`)) return false;
+    wantMicrophone = false;
+    return true;
+  };
   try {
     const profile = getRecordingProfile(ui.profile.value);
     // Video only: Firefox gives no tab or system sound to screen sharing.
@@ -575,13 +585,27 @@ async function startRecording() {
 
     // If a camera or microphone request is open (for example, from page
     // load), wait for it. A second request would make Firefox ask again.
-    await Promise.all([ensureCamera(), ensureMicrophone()]);
-    const withCamera = Boolean(ui.camera.checked && cameraStream);
     // A recording without sound starts only when you agree to it.
-    if (wantMicrophone && !micStream && micError &&
-        !window.confirm(`${microphoneErrorText(micError)}\n\nRecord without sound?`)) {
+    await ensureCamera();
+    const withCamera = Boolean(ui.camera.checked && cameraStream);
+    const cancel = () => {
       releaseStreams({ keepDevices: true });
       setView('setup');
+    };
+    if (!(await microphoneReady())) {
+      cancel();
+      return;
+    }
+
+    const countdownDone = await runCountdown(Number(ui.countdownSelect.value));
+    if (!countdownDone || videoTrack.readyState === 'ended') {
+      cancel();
+      return;
+    }
+    // The microphone can stop during the countdown. Then the page opens it
+    // again (see onMicrophoneEnded), so the stream is made only now.
+    if (!(await microphoneReady())) {
+      cancel();
       return;
     }
     const withMicrophone = Boolean(ui.mic.checked && micStream);
@@ -595,13 +619,6 @@ async function startRecording() {
     if (mimeType) options.mimeType = mimeType;
     if (hasAudio) options.audioBitsPerSecond = VOICE_AUDIO_BITS_PER_SECOND;
 
-    const countdownDone = await runCountdown(Number(ui.countdownSelect.value));
-    if (!countdownDone || videoTrack.readyState === 'ended') {
-      releaseStreams({ keepDevices: true });
-      setView('setup');
-      return;
-    }
-
     const settings = videoTrack.getSettings ? videoTrack.getSettings() : {};
     session = {
       profile,
@@ -609,8 +626,7 @@ async function startRecording() {
       // The loudest microphone level while recording (see updateMeter).
       // null while the level meter gives no values.
       micPeak: null,
-      // The microphone can stop during the countdown too.
-      micStopped: stream.getAudioTracks().some((track) => track.readyState === 'ended'),
+      micStopped: false,
       startedAt: new Date(),
       captureSize: { width: settings.width || 0, height: settings.height || 0 }
     };
