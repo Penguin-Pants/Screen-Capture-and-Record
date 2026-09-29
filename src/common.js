@@ -8,7 +8,7 @@ const SETTINGS_DEFAULTS = Object.freeze({
   exportFormat: 'webm',         // 'webm' | 'mp4'
   countdown: 3,
   microphone: false,
-  systemAudio: false,
+  microphoneDeviceId: '',       // Empty means the default microphone
   camera: false,                // Record the webcam too
   cameraDeviceId: '',           // Empty means the default camera
   cameraPosition: 'bottom-right', // A CAMERA_POSITIONS id, or 'hidden'
@@ -36,9 +36,8 @@ const EXPORT_PRESETS = Object.freeze([
   { id: 'tiny', label: 'Tiny', maxWidth: 640, maxHeight: 360, frameRate: 15, videoBitsPerSecond: 250000 }
 ]);
 
-// Opus audio: enough for a voice. System audio (music) gets more.
+// Opus audio from the microphone: enough for a voice.
 const VOICE_AUDIO_BITS_PER_SECOND = 64000;
-const SYSTEM_AUDIO_BITS_PER_SECOND = 128000;
 // Encoders can go a little above the target bitrate, so export estimates
 // add this margin. Screens with little motion often use less.
 const EXPORT_ESTIMATE_MARGIN = 1.1;

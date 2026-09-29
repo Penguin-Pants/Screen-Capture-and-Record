@@ -9,14 +9,14 @@ This project started from ScreenCapture Pro 1.0.1 (first commit of this reposito
 ## Features
 
 **Record**
-- Screen, window or tab, with optional microphone
+- Screen, window or tab, with optional microphone. A level meter shows that the microphone hears you, and you can choose the microphone. If the microphone gives no sound or stops, the recorder tells you
 - Optional webcam: you see yourself while you record, and your camera shows as a round bubble in a corner of the saved video
 - Quality presets (resolution limit, frame rate, bitrate) with an estimate in MB per minute. Default: up to 1080p, 30 fps, about 15 MB per minute
 - Live file size while recording; pause and resume; countdown; toolbar badge
 
 **After recording** (a review screen, or "Save at once" in Settings)
 - Choose where the camera bubble goes (any corner), its size, or hide it
-- Save the recording as it is, or a smaller copy from a preset (High 1080p, Medium 720p, Small 480p, Tiny 360p), each with its estimated size
+- Save the recording as it is, or a smaller copy from a preset (High 1080p, Medium 720p, Small 480p, Tiny 360p), each with its estimated size. Copies keep the recorded sound as it is (no new encode), and the recorder checks that each saved file has its sound
 - WebM, or MP4 where the browser can encode H.264
 - Saved files have a duration index, so video players can seek in them
 
@@ -61,10 +61,11 @@ The add-on ID is `screen-capture-and-record@penguin-pants`, from the earlier nam
 The automated tests run in Chromium. Do these checks in Firefox after a change to the recorder:
 
 1. **Open:** click the toolbar button (or press `Alt+Shift+R`). The recorder opens. Click it again: the same tab comes to the front.
-2. **Record:** tick **Include microphone**, record 10 s, pause and resume once, stop. The review screen opens. The microphone indicator in the Firefox address bar goes off.
-3. **Size:** save a **Medium** copy. The file is smaller than the recording, and seeking works in a video player.
+2. **Record:** tick **Include microphone** and allow the microphone. Talk: the level bar moves. Record 10 s, pause and resume once, stop. The review screen opens, and the preview plays your voice. The microphone indicator in the Firefox address bar goes off.
+3. **Size:** save a **Medium** copy. The file is smaller than the recording, seeking works in a video player, and you hear your voice.
 4. **Camera:** tick **Include camera**, allow the camera, record 10 s while you talk. After you stop, move the bubble to another corner, then save. The saved video shows you in that corner, in sync with your voice. The camera light goes off after you stop.
 5. **Save at once:** in Settings, set **After recording** to **Save at once**. Record and stop: the file saves without the review step.
+6. **Microphone problems:** open a new recorder tab. Tick **Include microphone** and click **Block** when Firefox asks. (If Firefox does not ask, remove the saved permission with the microphone icon in the address bar, then reload the page.) The option turns off, and a message tells you how to remove the block. Then mute your microphone in the system settings and tick **Include microphone** again: after 3 s, the hint says "No sound from this microphone".
 
 ## Project layout
 
@@ -82,7 +83,8 @@ docs/           Reverse-engineering report of the original extension
 
 ## Known limitations
 
-- Firefox gives no system or tab audio to `getDisplayMedia`. Recordings can include the microphone only.
+- Firefox gives no tab or system sound to screen sharing (`getDisplayMedia`, [Mozilla bug 1541425](https://bugzilla.mozilla.org/show_bug.cgi?id=1541425)). Recordings have the sound of the microphone only.
+- Firefox cannot encode AAC sound, so MP4 copies have Opus sound. Some players (for example, Windows Media Player) play these files with no sound. Browsers and VLC play the sound. The review shows a note when you choose MP4.
 - The camera bubble is added when you save, so a video with the camera always takes a short export step.
 - With the camera, **Full size** needs a video encoder that takes the full size of the recording. On a very large screen (for example 4K), some systems cannot do this. The review then turns off **Full size** and you choose a smaller size.
 - Size estimates are approximate. Encoders can go a little above the target bitrate (estimates add 10%), and screens with little motion often make smaller files.

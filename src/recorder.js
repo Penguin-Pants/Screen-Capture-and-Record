@@ -21,7 +21,11 @@ const ui = {
   profileHint: $('profileHint'),
   countdownSelect: $('countdownSelect'),
   mic: $('micCheck'),
-  audio: $('audioCheck'),
+  micSetup: $('micSetup'),
+  micMeterFill: $('micMeterFill'),
+  micHint: $('micHint'),
+  micDevice: $('micDevice'),
+  micDeviceRow: $('micDeviceRow'),
   camera: $('cameraCheck'),
   cameraNote: $('cameraNote'),
   cameraSetup: $('cameraSetup'),
@@ -34,6 +38,8 @@ const ui = {
   timer: $('timer'),
   liveSize: $('liveSize'),
   liveCamera: $('liveCamera'),
+  liveMeter: $('liveMeter'),
+  liveMeterFill: $('liveMeterFill'),
   recIndicator: $('recIndicator'),
   recLabel: $('recLabel'),
   countdown: $('countdown'),
@@ -47,6 +53,7 @@ const ui = {
   presets: $('presets'),
   exportNote: $('exportNote'),
   format: $('formatSelect'),
+  formatNote: $('formatNote'),
   progress: $('progress'),
   progressFill: $('progressFill'),
   progressText: $('progressText'),
@@ -65,19 +72,23 @@ let cameraRecorder = null;  // The webcam recorder, when the camera is on
 let chunks = [];
 let cameraChunks = [];
 let recordedBytes = 0;
-let sourceStreams = [];     // Screen and microphone streams. All tracks stop at the end.
+let sourceStreams = [];     // Screen streams. All tracks stop at the end.
 let cameraStream = null;    // The webcam stream: preview before and during recording
 let cameraRequest = 0;      // Number of the newest camera request (see startCameraPreview)
 let cameraPending = null;   // The camera request that waits for an answer, if any
-let audioContext = null;
+let micStream = null;       // The microphone stream: level meter before and during recording
+let micRequest = 0;         // Number of the newest microphone request (see startMicrophone)
+let micPending = null;      // The microphone request that waits for an answer, if any
+let micError = null;        // Why the newest microphone request failed, if it did
+let meter = null;           // The level meter of the microphone (see startMeter)
 let activeMs = 0;           // Recorded time before the last resume
 let resumedAt = 0;
 let timerInterval = null;
 let cancelCountdown = null;
-let session = null;         // { profile, hasAudio, startedAt, captureSize }
+let session = null;         // { profile, hasAudio, micPeak, micStopped, startedAt, captureSize }
 
 // Review state. recording: { blob, mimeType, seconds, width, height,
-// frameRate, videoBitsPerSecond, hasAudio, camera, baseName, saved }
+// frameRate, videoBitsPerSecond, hasAudio, audioStatus, camera, baseName, saved }
 let recording = null;
 let previewUrl = null;
 let previewCameraUrl = null;
@@ -123,16 +134,9 @@ function profileLabel(profile) {
   return `${profile.label}: ${size}, ${profile.frameRate} fps`;
 }
 
-// Audio bitrate for the recording: voice for the microphone, more when
-// system or tab sound is part of the mix.
-function audioBitsPerSecond(withSystemAudio, withMicrophone) {
-  if (withSystemAudio) return SYSTEM_AUDIO_BITS_PER_SECOND;
-  return withMicrophone ? VOICE_AUDIO_BITS_PER_SECOND : 0;
-}
-
 function updateProfileHint() {
   const profile = getRecordingProfile(ui.profile.value);
-  const audio = audioBitsPerSecond(ui.audio.checked, ui.mic.checked);
+  const audio = ui.mic.checked ? VOICE_AUDIO_BITS_PER_SECOND : 0;
   ui.profileHint.textContent =
     `About ${formatBytes(bytesPerMinute(profile, audio))} per minute. Often less when little moves on the screen.`;
 }
@@ -159,8 +163,10 @@ async function initOptions() {
   ui.profile.value = getRecordingProfile(settings.profile).id;
   ui.countdownSelect.value = String(settings.countdown);
   ui.mic.checked = settings.microphone;
-  ui.audio.checked = settings.systemAudio;
   updateProfileHint();
+  // As for the camera: Firefox asks now, and the level meter shows that
+  // the microphone hears you before you record.
+  if (settings.microphone) startMicrophone(settings.microphoneDeviceId);
 
   if (!cameraSupported()) {
     ui.camera.disabled = true;
@@ -175,13 +181,21 @@ async function initOptions() {
   const persist = () => saveSettings({
     profile: ui.profile.value,
     countdown: Number(ui.countdownSelect.value),
-    microphone: ui.mic.checked,
-    systemAudio: ui.audio.checked
+    microphone: ui.mic.checked
   });
-  [ui.profile, ui.countdownSelect, ui.mic, ui.audio].forEach((el) => el.addEventListener('change', () => {
+  [ui.profile, ui.countdownSelect, ui.mic].forEach((el) => el.addEventListener('change', () => {
     updateProfileHint();
     persist();
   }));
+
+  ui.mic.addEventListener('change', () => {
+    if (ui.mic.checked) ensureMicrophone();
+    else stopMicrophone();
+  });
+  ui.micDevice.addEventListener('change', () => {
+    saveSettings({ microphoneDeviceId: ui.micDevice.value });
+    startMicrophone(ui.micDevice.value);
+  });
 
   ui.camera.addEventListener('change', () => {
     saveSettings({ camera: ui.camera.checked });
@@ -280,6 +294,215 @@ async function fillCameraDevices() {
   ui.cameraDeviceRow.style.display = devices.length > 1 ? '' : 'none';
 }
 
+// ------------------------------------------------------------ Microphone
+
+// Echo cancellation, noise suppression and automatic gain control make a
+// voice clear. Firefox uses them by default too.
+const MIC_PROCESSING = { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
+// The level meter shows -60 dB (empty) to 0 dB (full). A normal voice
+// fills about half of the bar.
+const METER_FLOOR_DB = -60;
+// Below this level (about -70 dB), the microphone gives no usable sound.
+// A muted microphone, or one that the system does not let Firefox use,
+// gives zeros.
+const SILENCE_LEVEL = 0.0003;
+// Time without sound before the hint tells you to check the microphone.
+const SILENCE_HINT_MS = 3000;
+const MIC_HINT = 'Talk to test the microphone. The bar moves when it hears you.';
+const MIC_SILENT_HINT = 'No sound from this microphone. If the bar does not move when you talk, choose another ' +
+  'microphone, make sure that it is not muted, and make sure that your system settings let Firefox use it.';
+const AUDIO_WARNINGS = {
+  silent: 'The microphone gave no sound during this recording. Before you record again, talk and look at the ' +
+    'level bar under "Include microphone".',
+  stopped: 'The microphone stopped during this recording. Part of the video has no sound.'
+};
+
+// Open the microphone for the level meter. The same stream is recorded
+// later, so Firefox asks for permission only once. As for the camera (see
+// startCameraPreview), each request gets a number, and the answer to an
+// old request is not used.
+function startMicrophone(deviceId) {
+  stopMicrophone();
+  micError = null;
+  const request = ++micRequest;
+  const pending = openMicrophone(request, deviceId).finally(() => {
+    if (micPending === pending) micPending = null;
+  });
+  micPending = pending;
+  return pending;
+}
+
+async function openMicrophone(request, deviceId) {
+  let stream;
+  try {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: deviceId ? { ...MIC_PROCESSING, deviceId: { exact: deviceId } } : MIC_PROCESSING
+      });
+    } catch (error) {
+      if (!deviceId || error.name !== 'OverconstrainedError') throw error;
+      // The saved microphone is gone. Use the default microphone.
+      stream = await navigator.mediaDevices.getUserMedia({ audio: MIC_PROCESSING });
+    }
+  } catch (error) {
+    if (request !== micRequest) return;
+    micError = error;
+    ui.mic.checked = false;
+    saveSettings({ microphone: false });
+    updateProfileHint();
+    updateMicSetup();
+    showMessage(microphoneErrorText(error), 'error');
+    return;
+  }
+  if (request !== micRequest) {
+    stream.getTracks().forEach((track) => track.stop());
+    return;
+  }
+  micStream = stream;
+  stream.getAudioTracks().forEach((track) => track.addEventListener('ended', onMicrophoneEnded));
+  startMeter(stream);
+  updateMicSetup();
+  await fillMicDevices();
+}
+
+function microphoneErrorText(error) {
+  if (error.name === 'NotAllowedError') {
+    return 'Firefox did not allow the microphone. To record your voice, tick "Include microphone" and allow the ' +
+      'microphone. If Firefox does not ask, click the microphone icon in the address bar, remove the block, then ' +
+      'reload this page.';
+  }
+  if (error.name === 'NotFoundError') {
+    return 'Firefox found no microphone. Connect a microphone, then tick "Include microphone".';
+  }
+  return `The microphone is not available (${error.message}). Make sure that no other app uses it and that your ` +
+    'system settings let Firefox use it.';
+}
+
+// Open the microphone if the option is on and no microphone is open or
+// opening. Resolves when the newest microphone request has its answer.
+async function ensureMicrophone() {
+  if (ui.mic.checked && !micStream && !micPending) {
+    const { microphoneDeviceId } = await getSettings();
+    if (ui.mic.checked && !micStream && !micPending) startMicrophone(microphoneDeviceId);
+  }
+  while (micPending) await micPending;
+}
+
+function stopMicrophone() {
+  // A microphone request that has no answer yet is no longer wanted.
+  micRequest++;
+  micPending = null;
+  stopMeter();
+  if (micStream) micStream.getTracks().forEach((track) => track.stop());
+  micStream = null;
+  updateMicSetup();
+}
+
+function updateMicSetup() {
+  ui.micSetup.classList.toggle('show', Boolean(ui.mic.checked && micStream));
+}
+
+// Microphone names show only after permission is given. The list shows
+// only when there is more than one microphone.
+async function fillMicDevices() {
+  const devices = (await navigator.mediaDevices.enumerateDevices()).filter((device) => device.kind === 'audioinput');
+  ui.micDevice.replaceChildren(...devices.map((device, index) => new Option(device.label || `Microphone ${index + 1}`, device.deviceId)));
+  const track = micStream && micStream.getAudioTracks()[0];
+  const current = track && track.getSettings().deviceId;
+  if (current && devices.some((device) => device.deviceId === current)) ui.micDevice.value = current;
+  ui.micDeviceRow.style.display = devices.length > 1 ? '' : 'none';
+}
+
+// The microphone stopped, for example because it was unplugged. (A track
+// that we stop ourselves gives no "ended" event.)
+function onMicrophoneEnded(event) {
+  if (!micStream || !micStream.getAudioTracks().includes(event.target)) return;
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    session.micStopped = true;
+    showMessage('The microphone stopped. The rest of the video has no sound.', 'error');
+    return;
+  }
+  // Before recording: open the microphone again (the default microphone,
+  // if the chosen one is gone).
+  stopMicrophone();
+  showMessage('The microphone stopped (for example, it was unplugged). Check the microphone before you record.', 'error');
+  ensureMicrophone();
+}
+
+// Level meter: an analyser reads the microphone 10 times a second. The
+// same values tell when the microphone gives no sound.
+function startMeter(stream) {
+  stopMeter();
+  let context = null;
+  try {
+    context = new AudioContext();
+    const analyser = context.createAnalyser();
+    analyser.fftSize = 2048;
+    context.createMediaStreamSource(stream).connect(analyser);
+    meter = { context, analyser, data: new Float32Array(analyser.fftSize), heardAt: Date.now(), timer: 0 };
+  } catch (error) {
+    // Without the meter, the microphone still records.
+    console.warn('Could not start the level meter:', error);
+    if (context) context.close().catch(() => {});
+    ui.micSetup.classList.add('no-meter');
+    ui.micHint.textContent = 'The level meter is not available. The microphone records.';
+    ui.micHint.classList.remove('warn');
+    return;
+  }
+  ui.micSetup.classList.remove('no-meter');
+  // A new AudioContext can start "suspended" (autoplay rules). The click on
+  // Start also resumes it.
+  meter.context.resume().catch(() => {});
+  meter.timer = setInterval(updateMeter, 100);
+  setMicHint(false);
+}
+
+function stopMeter() {
+  if (!meter) return;
+  clearInterval(meter.timer);
+  meter.context.close().catch(() => {});
+  meter = null;
+  ui.micMeterFill.style.width = '0';
+  ui.liveMeterFill.style.width = '0';
+}
+
+function updateMeter() {
+  const now = Date.now();
+  if (meter.context.state !== 'running') {
+    // No values yet: do not judge the sound.
+    meter.heardAt = now;
+    return;
+  }
+  meter.analyser.getFloatTimeDomainData(meter.data);
+  let peak = 0;
+  for (const value of meter.data) peak = Math.max(peak, Math.abs(value));
+  const decibels = peak > 0 ? 20 * Math.log10(peak) : -Infinity;
+  const width = `${Math.round(Math.min(1, Math.max(0, 1 - decibels / METER_FLOOR_DB)) * 100)}%`;
+  ui.micMeterFill.style.width = width;
+  ui.liveMeterFill.style.width = width;
+
+  if (peak >= SILENCE_LEVEL) meter.heardAt = now;
+  setMicHint(now - meter.heardAt >= SILENCE_HINT_MS);
+  if (session && mediaRecorder && mediaRecorder.state === 'recording') {
+    session.micPeak = Math.max(session.micPeak || 0, peak);
+  }
+}
+
+function setMicHint(silent) {
+  const text = silent ? MIC_SILENT_HINT : MIC_HINT;
+  if (ui.micHint.textContent !== text) ui.micHint.textContent = text;
+  ui.micHint.classList.toggle('warn', silent);
+}
+
+// The sound of a recording: 'none' (no microphone), 'silent' (the
+// microphone gave no sound), 'stopped' (the microphone stopped during the
+// recording) or 'ok'. Without level values, the sound is not judged.
+function audioStatusFor(s) {
+  if (!s.hasAudio) return 'none';
+  if (s.micPeak !== null && s.micPeak < SILENCE_LEVEL) return 'silent';
+  return s.micStopped ? 'stopped' : 'ok';
+}
+
 function chooseMimeType(hasAudio) {
   for (const type of RECORDING_TYPES) {
     const preferred = hasAudio ? type.withAudio : type.videoOnly;
@@ -315,48 +538,6 @@ function runCountdown(seconds) {
 
 // ------------------------------------------------------------ Recording
 
-async function buildStream(displayStream) {
-  const tracks = [...displayStream.getVideoTracks()];
-  const audioSources = [];
-  let hasSystemAudio = false;
-  let hasMicrophone = false;
-
-  if (ui.audio.checked) {
-    if (displayStream.getAudioTracks().length > 0) {
-      audioSources.push(new MediaStream(displayStream.getAudioTracks()));
-      hasSystemAudio = true;
-    } else {
-      showMessage('Firefox did not supply system or tab audio. The video records without it.', 'info');
-    }
-  }
-
-  if (ui.mic.checked) {
-    try {
-      const micStream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
-      });
-      sourceStreams.push(micStream);
-      audioSources.push(micStream);
-      hasMicrophone = true;
-    } catch (error) {
-      showMessage(`The microphone is not available (${error.message}). The video records without it.`, 'error');
-    }
-  }
-
-  if (audioSources.length === 1) {
-    tracks.push(...audioSources[0].getAudioTracks());
-  } else if (audioSources.length > 1) {
-    audioContext = new AudioContext();
-    const destination = audioContext.createMediaStreamDestination();
-    for (const source of audioSources) {
-      audioContext.createMediaStreamSource(source).connect(destination);
-    }
-    tracks.push(...destination.stream.getAudioTracks());
-  }
-
-  return { stream: new MediaStream(tracks), audioBits: audioBitsPerSecond(hasSystemAudio, hasMicrophone) };
-}
-
 // Screen size limit and frame rate for getDisplayMedia(). Firefox scales
 // the screen down to fit inside the maximum size.
 function displayConstraints(profile) {
@@ -379,33 +560,44 @@ function whenStopped(recorder) {
 async function startRecording() {
   clearMessage();
   ui.start.disabled = true;
+  // The click lets a suspended level meter start (autoplay rules).
+  if (meter) meter.context.resume().catch(() => {});
+  const wantMicrophone = ui.mic.checked;
   try {
     const profile = getRecordingProfile(ui.profile.value);
-    const displayStream = await navigator.mediaDevices.getDisplayMedia({
-      video: displayConstraints(profile),
-      audio: ui.audio.checked
-    });
+    // Video only: Firefox gives no tab or system sound to screen sharing.
+    const displayStream = await navigator.mediaDevices.getDisplayMedia({ video: displayConstraints(profile) });
     sourceStreams = [displayStream];
 
     // Stop when the person ends sharing from the Firefox sharing indicator.
     const videoTrack = displayStream.getVideoTracks()[0];
     videoTrack.addEventListener('ended', stopRecording);
 
-    const { stream, audioBits } = await buildStream(displayStream);
-    const hasAudio = stream.getAudioTracks().length > 0;
+    // If a camera or microphone request is open (for example, from page
+    // load), wait for it. A second request would make Firefox ask again.
+    await Promise.all([ensureCamera(), ensureMicrophone()]);
+    const withCamera = Boolean(ui.camera.checked && cameraStream);
+    // A recording without sound starts only when you agree to it.
+    if (wantMicrophone && !micStream && micError &&
+        !window.confirm(`${microphoneErrorText(micError)}\n\nRecord without sound?`)) {
+      releaseStreams({ keepDevices: true });
+      setView('setup');
+      return;
+    }
+    const withMicrophone = Boolean(ui.mic.checked && micStream);
+    const stream = new MediaStream([
+      ...displayStream.getVideoTracks(),
+      ...(withMicrophone ? micStream.getAudioTracks() : [])
+    ]);
+    const hasAudio = withMicrophone;
     const mimeType = chooseMimeType(hasAudio);
     const options = { videoBitsPerSecond: profile.videoBitsPerSecond };
     if (mimeType) options.mimeType = mimeType;
-    if (hasAudio) options.audioBitsPerSecond = audioBits;
-
-    // If a camera request is open (for example, from page load), wait for
-    // it. A second request would make Firefox ask again.
-    await ensureCamera();
-    const withCamera = Boolean(ui.camera.checked && cameraStream);
+    if (hasAudio) options.audioBitsPerSecond = VOICE_AUDIO_BITS_PER_SECOND;
 
     const countdownDone = await runCountdown(Number(ui.countdownSelect.value));
     if (!countdownDone || videoTrack.readyState === 'ended') {
-      releaseStreams({ keepCamera: true });
+      releaseStreams({ keepDevices: true });
       setView('setup');
       return;
     }
@@ -414,6 +606,11 @@ async function startRecording() {
     session = {
       profile,
       hasAudio,
+      // The loudest microphone level while recording (see updateMeter).
+      // null while the level meter gives no values.
+      micPeak: null,
+      // The microphone can stop during the countdown too.
+      micStopped: stream.getAudioTracks().some((track) => track.readyState === 'ended'),
       startedAt: new Date(),
       captureSize: { width: settings.width || 0, height: settings.height || 0 }
     };
@@ -449,6 +646,7 @@ async function startRecording() {
       ui.liveCamera.srcObject = cameraStream;
       ui.liveCamera.classList.add('show');
     }
+    ui.liveMeter.classList.toggle('show', Boolean(withMicrophone && meter));
 
     mediaRecorder.start(1000);
     if (cameraRecorder) cameraRecorder.start(1000);
@@ -462,7 +660,7 @@ async function startRecording() {
     setView('live');
     reportState('recording');
   } catch (error) {
-    releaseStreams({ keepCamera: true });
+    releaseStreams({ keepDevices: true });
     setView('setup');
     if (error.name !== 'NotAllowedError' && error.name !== 'AbortError') {
       showMessage(`Could not start recording: ${error.message}`, 'error');
@@ -507,16 +705,18 @@ function stopRecording() {
   reportState('idle');
 }
 
-// Stop every track of every stream we opened (screen, microphone, camera)
-// and close the audio mixer, so no capture indicator stays on.
-function releaseStreams({ keepCamera = false } = {}) {
+// Stop every track of every stream we opened (screen, microphone, camera),
+// so no capture indicator stays on. keepDevices keeps the camera and the
+// microphone open for the next try.
+function releaseStreams({ keepDevices = false } = {}) {
   for (const stream of sourceStreams) {
     stream.getTracks().forEach((track) => track.stop());
   }
   sourceStreams = [];
-  if (audioContext && audioContext.state !== 'closed') audioContext.close();
-  audioContext = null;
-  if (!keepCamera) stopCamera();
+  if (!keepDevices) {
+    stopCamera();
+    stopMicrophone();
+  }
 }
 
 function activeSeconds() {
@@ -566,6 +766,7 @@ async function finishRecording() {
     setView('setup');
     showMessage('The recording is empty. Nothing was saved.', 'error');
     ensureCamera();
+    ensureMicrophone();
     return;
   }
 
@@ -596,6 +797,7 @@ async function finishRecording() {
     frameRate: session.profile.frameRate,
     videoBitsPerSecond: session.profile.videoBitsPerSecond,
     hasAudio: session.hasAudio,
+    audioStatus: audioStatusFor(session),
     camera: cameraBlob ? { blob: cameraBlob } : null,
     baseName: `recording-${fileTimestamp(session.startedAt)}`,
     saved: false
@@ -605,6 +807,8 @@ async function finishRecording() {
   if (!ui.cameraPosition.value) ui.cameraPosition.value = CAMERA_POSITIONS[0].id;
   ui.cameraSize.value = settings.cameraSize;
   if (!ui.cameraSize.value) ui.cameraSize.value = 'medium';
+  const warning = AUDIO_WARNINGS[recording.audioStatus];
+  if (warning) showMessage(warning, 'error');
   renderReview(settings);
   setView('result');
 
@@ -634,10 +838,19 @@ async function saveAsRecorded(rec) {
   }
   await saveRecording('original');
   if (recording === rec && rec.saved) {
-    showMessage(cameraOn()
+    const text = cameraOn()
       ? 'The recording was saved with your camera. You can also save a smaller copy below.'
-      : 'The recording was saved as it is. You can also save a smaller copy below.', 'info');
+      : 'The recording was saved as it is. You can also save a smaller copy below.';
+    const warning = AUDIO_WARNINGS[rec.audioStatus];
+    showMessage(warning ? `${text} ${warning}` : text, warning ? 'error' : 'info');
   }
+}
+
+// A problem with the sound stays in view until a new recording starts.
+function resetMessage() {
+  const warning = recording && AUDIO_WARNINGS[recording.audioStatus];
+  if (warning) showMessage(warning, 'error');
+  else clearMessage();
 }
 
 // Mediabunny (MPL-2.0, src/vendor/mediabunny) reads, converts and writes
@@ -670,17 +883,20 @@ async function detectExportSupport(rec) {
   const check = fitWithin(rec.width, rec.height, EXPORT_PRESETS[0].maxWidth, EXPORT_PRESETS[0].maxHeight);
   const formats = [];
   try {
+    // The recorded sound (Opus) goes into WebM and MP4 files as it is, with
+    // no new encode (see saveRecording). So Opus needs no audio encoder.
     const webmCodecs = ['vp9', 'vp8'];
     const webmVideo = await mb.getFirstEncodableVideoCodec(webmCodecs, check);
-    const webmAudio = rec.hasAudio ? await mb.getFirstEncodableAudioCodec(['opus']) : null;
-    if (webmVideo && (!rec.hasAudio || webmAudio)) {
-      formats.push({ id: 'webm', label: 'WebM (small files, plays in browsers)', container: 'webm', videoCodecs: webmCodecs, videoCodec: webmVideo, audioCodec: webmAudio });
+    if (webmVideo) {
+      formats.push({ id: 'webm', label: 'WebM (small files, plays in browsers)', container: 'webm', videoCodecs: webmCodecs, videoCodec: webmVideo, audioCodec: rec.hasAudio ? 'opus' : null });
     }
     const mp4Codecs = ['avc'];
     const mp4Video = await mb.getFirstEncodableVideoCodec(mp4Codecs, check);
-    const mp4Audio = rec.hasAudio ? await mb.getFirstEncodableAudioCodec(['aac', 'opus']) : null;
-    if (mp4Video && (!rec.hasAudio || mp4Audio)) {
-      const label = mp4Audio === 'opus' ? 'MP4 (H.264 video, Opus audio)' : 'MP4 (plays in more apps)';
+    if (mp4Video) {
+      // AAC sound plays in the most apps, but Firefox cannot encode AAC.
+      // Then the MP4 file has Opus sound (see updateFormatNote).
+      const mp4Audio = rec.hasAudio ? (await mb.getFirstEncodableAudioCodec(['aac'])) || 'opus' : null;
+      const label = mp4Audio === 'opus' ? 'MP4 (H.264 video, Opus sound)' : 'MP4 (plays in more apps)';
       formats.push({ id: 'mp4', label, container: 'mp4', videoCodecs: mp4Codecs, videoCodec: mp4Video, audioCodec: mp4Audio });
     }
     // With the camera, "Full size" encodes at the size of the recording,
@@ -784,6 +1000,8 @@ function renderReview(settings) {
   const parts = [`Length ${formatDuration(rec.seconds)}`];
   if (rec.width) parts.push(`${rec.width} × ${rec.height}`);
   parts.push(formatBytes(rec.blob.size));
+  const sound = { none: 'no sound', silent: 'no sound from the microphone', stopped: 'microphone stopped' }[rec.audioStatus];
+  if (sound) parts.push(sound);
   if (rec.camera) parts.push('with camera');
   ui.details.textContent = parts.join(' · ');
 
@@ -868,11 +1086,21 @@ function renderFormats(settings) {
     const type = recording.mimeType.startsWith('video/mp4') ? 'MP4' : 'WebM';
     ui.format.add(new Option(`${type} (as recorded)`, 'original'));
     ui.format.disabled = true;
-    return;
+  } else {
+    for (const format of formats) ui.format.add(new Option(format.label, format.id));
+    ui.format.value = formats.some((format) => format.id === previous) ? previous : formats[0].id;
+    ui.format.disabled = Boolean(conversion);
   }
-  for (const format of formats) ui.format.add(new Option(format.label, format.id));
-  ui.format.value = formats.some((format) => format.id === previous) ? previous : formats[0].id;
-  ui.format.disabled = Boolean(conversion);
+  updateFormatNote();
+}
+
+// Opus sound in an MP4 file is valid, but some players do not play it.
+function updateFormatNote() {
+  const format = formatsFor(selectedChoiceId()).find((item) => item.id === ui.format.value);
+  ui.formatNote.textContent = format && format.container === 'mp4' && format.audioCodec === 'opus'
+    ? 'Some players (for example, Windows Media Player) cannot play Opus sound in an MP4 file. They play the ' +
+      'video with no sound. Browsers and VLC play the sound. Before you share the file, test it in the app that people will use.'
+    : '';
 }
 
 function setBusy(busy) {
@@ -995,12 +1223,31 @@ async function convertRecording(trackOptions, container, withCamera = false) {
       const reasons = conversion.discardedTracks.map((track) => track.reason).join(', ');
       throw new Error(`This browser cannot make this file (${reasons || 'no usable track'}).`);
     }
+    // A valid conversion can still leave out the sound, for example when
+    // the browser cannot decode or encode it. A video without its sound is
+    // not what you asked for, so stop.
+    const lostAudio = recording.hasAudio && conversion.discardedTracks.find((item) => item.track.type === 'audio');
+    if (lostAudio) throw new Error(`This browser cannot put the sound in this file (${lostAudio.reason}).`);
     conversion.onProgress = updateProgress;
     await conversion.execute();
     if (cancelRequested) throw cancelledError();
-    return new Blob([output.target.buffer], { type: container === 'mp4' ? 'video/mp4' : 'video/webm' });
+    const blob = new Blob([output.target.buffer], { type: container === 'mp4' ? 'video/mp4' : 'video/webm' });
+    // An audio encoder can also give no output at all.
+    if (recording.hasAudio && !(await hasAudioPackets(mb, blob))) throw new Error('The sound did not go into the file.');
+    return blob;
   } finally {
     if (overlay) await overlay.dispose();
+    input.dispose();
+  }
+}
+
+// True when the file has a sound track with at least one packet.
+async function hasAudioPackets(mb, blob) {
+  const input = new mb.Input({ formats: mb.ALL_FORMATS, source: new mb.BlobSource(blob) });
+  try {
+    const track = await input.getPrimaryAudioTrack();
+    return Boolean(track && await new mb.EncodedPacketSink(track).getFirstPacket());
+  } finally {
     input.dispose();
   }
 }
@@ -1028,7 +1275,7 @@ async function saveRecording(choiceId = selectedChoiceId()) {
   const choice = exportChoices().find((item) => item.id === choiceId);
   if (!choice || !choice.enabled) return;
 
-  clearMessage();
+  resetMessage();
   setBusy(true);
   try {
     let blob;
@@ -1054,7 +1301,13 @@ async function saveRecording(choiceId = selectedChoiceId()) {
         }
       };
       if (rec.hasAudio) {
-        trackOptions.audio = { codec: format.audioCodec, bitrate: plan.audioBitsPerSecond, forceTranscode: true };
+        // Copy the recorded Opus sound as it is. A new encode would not make
+        // the file much smaller, and it depends on the browser's audio
+        // encoder: when that fails, the sound is lost. (A bitrate would force
+        // a new encode.) AAC sound for MP4 needs a new encode.
+        trackOptions.audio = format.audioCodec === 'opus'
+          ? { codec: 'opus' }
+          : { codec: format.audioCodec, bitrate: plan.audioBitsPerSecond };
       }
       blob = await convertRecording(trackOptions, format.container, cameraOn());
       if (choice.id !== 'original') suffix = `-${plan.height}p`;
@@ -1138,6 +1391,7 @@ ui.cancelExport.addEventListener('click', () => {
 ui.presets.addEventListener('change', async () => {
   renderFormats(await getSettings());
 });
+ui.format.addEventListener('change', updateFormatNote);
 for (const select of [ui.cameraPosition, ui.cameraSize]) {
   select.addEventListener('change', async () => {
     const patch = { cameraSize: ui.cameraSize.value };
@@ -1163,6 +1417,7 @@ ui.again.addEventListener('click', () => {
   clearReview();
   setView('setup');
   ensureCamera();
+  ensureMicrophone();
 });
 ui.settingsLink.addEventListener('click', () => browser.runtime.openOptionsPage());
 
