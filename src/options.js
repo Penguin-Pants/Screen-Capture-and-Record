@@ -47,6 +47,8 @@ async function init() {
   document.getElementById('jpegQualityValue').textContent = settings.jpegQuality;
   updateJpegControls(settings.imageFormat);
 
+  await initRecordingOptions();
+
   const table = document.getElementById('shortcuts');
   for (const command of await browser.commands.getAll()) {
     const row = table.insertRow();
@@ -60,6 +62,30 @@ async function init() {
       keyCell.textContent = 'Not set';
     }
   }
+}
+
+// Recording defaults live with the recorder settings, so the recorder page
+// and this page change the same values.
+async function initRecordingOptions() {
+  const recorder = await getRecorderSettings();
+  const profile = document.getElementById('recordingProfile');
+  for (const item of RECORDING_PROFILES) {
+    const size = item.maxWidth ? `up to ${item.maxWidth} \u00d7 ${item.maxHeight}` : 'full screen size';
+    const perMinute = formatBytes(bytesPerMinute(item, VOICE_AUDIO_BITS_PER_SECOND));
+    profile.add(new Option(`${item.label}: ${size}, ${item.frameRate} fps (about ${perMinute} per minute)`, item.id));
+  }
+  profile.value = getRecordingProfile(recorder.profile).id;
+  const afterRecording = document.getElementById('afterRecording');
+  afterRecording.value = recorder.afterRecording;
+
+  profile.addEventListener('input', async () => {
+    await saveRecorderSettings({ profile: profile.value });
+    showSaved();
+  });
+  afterRecording.addEventListener('input', async () => {
+    await saveRecorderSettings({ afterRecording: afterRecording.value });
+    showSaved();
+  });
 }
 
 init();

@@ -22,18 +22,20 @@
       background: #fff;
       border-radius: 18px;
       padding: 32px;
-      max-width: 560px;
+      max-width: 620px;
       width: 100%;
       box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
     }
 
     h1 { font-size: 26px; text-align: center; }
+    h2 { font-size: 16px; margin: 4px 0 8px; }
     .subtitle { text-align: center; color: #666; margin-bottom: 22px; }
 
     .panel { background: #f6f7fb; border-radius: 12px; padding: 16px 18px; margin-bottom: 16px; }
     .row { display: grid; grid-template-columns: 150px 1fr; gap: 10px; align-items: center; padding: 6px 0; }
     .row label { font-weight: 600; }
     .row select { width: 100%; padding: 6px 8px; border: 1px solid #ccc; border-radius: 8px; font: inherit; background: #fff; }
+    .hint { color: #555; font-size: 13px; padding: 0 0 6px 160px; }
     .check { display: flex; align-items: center; gap: 8px; padding: 6px 0; }
     .check input { width: 18px; height: 18px; }
     .check small { color: #777; }
@@ -54,6 +56,7 @@
     .btn-stop { background: #d93025; }
     .btn-secondary { background: #6b6b80; }
     .btn-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .btn-row + .btn-row { margin-top: 10px; }
 
     .live { display: none; text-align: center; }
     .live.active { display: block; }
@@ -62,7 +65,8 @@
     .rec-dot { width: 12px; height: 12px; border-radius: 50%; background: currentColor; animation: blink 1s infinite; }
     .rec-indicator.paused .rec-dot { animation: none; }
     @keyframes blink { 50% { opacity: 0.3; } }
-    .timer { font: 700 40px/1.2 ui-monospace, 'Courier New', monospace; margin: 6px 0 14px; }
+    .timer { font: 700 40px/1.2 ui-monospace, 'Courier New', monospace; margin: 6px 0 2px; }
+    .live-size { color: #444; margin-bottom: 14px; }
 
     .countdown {
       position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
@@ -72,8 +76,38 @@
 
     .result { display: none; }
     .result.active { display: block; }
-    .result video { width: 100%; max-height: 320px; border-radius: 10px; background: #000; margin-bottom: 10px; }
-    .result .meta { color: #444; margin-bottom: 12px; word-break: break-all; }
+    .result video { width: 100%; max-height: 320px; border-radius: 10px; background: #000; margin-bottom: 8px; }
+    .details { color: #444; margin-bottom: 12px; }
+
+    .presets { border: none; }
+    .preset {
+      display: grid;
+      grid-template-columns: 20px 1fr auto;
+      gap: 10px;
+      align-items: center;
+      padding: 8px 10px;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+    .preset:hover { background: #eceff8; }
+    .preset input { width: 16px; height: 16px; }
+    .preset .name { font-weight: 600; }
+    .preset .spec { color: #555; font-size: 13px; }
+    .preset .size { font-weight: 700; white-space: nowrap; }
+    .preset.disabled { opacity: 0.45; cursor: not-allowed; }
+    .preset.disabled:hover { background: none; }
+    .note { color: #555; font-size: 13px; margin-top: 6px; }
+
+    .progress { display: none; margin: 12px 0; }
+    .progress.active { display: block; }
+    .progress-bar { height: 10px; border-radius: 5px; background: #e3e6f0; overflow: hidden; margin-bottom: 6px; }
+    .progress-fill { height: 100%; width: 0; background: linear-gradient(90deg, #667eea, #764ba2); }
+    .progress-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+    .progress-row button { padding: 4px 12px; border: 1px solid #aaa; border-radius: 6px; background: #fff; font: inherit; cursor: pointer; }
+
+    .saved { display: none; margin: 12px 0; padding: 10px 12px; border-radius: 10px; background: #e7f5ea; color: #1d5b2c; word-break: break-all; }
+    .saved.show { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+    .saved button { padding: 4px 12px; border: 1px solid #7fb48d; border-radius: 6px; background: #fff; font: inherit; cursor: pointer; white-space: nowrap; }
 
     .message { display: none; margin-bottom: 16px; padding: 10px 12px; border-radius: 10px; }
     .message.show { display: block; }
@@ -82,6 +116,11 @@
 
     .info { font-size: 13px; color: #555; margin-top: 16px; }
     .info li { margin-left: 18px; }
+
+    @media (max-width: 560px) {
+      .row { grid-template-columns: 1fr; }
+      .hint { padding-left: 0; }
+    }
   </style>
 </head>
 <body>
@@ -94,26 +133,10 @@
     <div id="setup">
       <div class="panel">
         <div class="row">
-          <label for="formatSelect">Format</label>
-          <select id="formatSelect"></select>
+          <label for="profileSelect">Quality</label>
+          <select id="profileSelect"></select>
         </div>
-        <div class="row">
-          <label for="qualitySelect">Quality</label>
-          <select id="qualitySelect">
-            <option value="2500000">Low (2.5 Mbps)</option>
-            <option value="5000000">Standard (5 Mbps)</option>
-            <option value="8000000">High (8 Mbps)</option>
-            <option value="12000000">Very high (12 Mbps)</option>
-          </select>
-        </div>
-        <div class="row">
-          <label for="fpsSelect">Frame rate</label>
-          <select id="fpsSelect">
-            <option value="15">15 fps</option>
-            <option value="30">30 fps</option>
-            <option value="60">60 fps</option>
-          </select>
-        </div>
+        <p class="hint" id="profileHint"></p>
         <div class="row">
           <label for="countdownSelect">Countdown</label>
           <select id="countdownSelect">
@@ -131,6 +154,7 @@
     <div class="live" id="live">
       <div class="rec-indicator" id="recIndicator"><span class="rec-dot"></span><span id="recLabel">Recording</span></div>
       <div class="timer" id="timer">00:00</div>
+      <div class="live-size" id="liveSize">0 KB so far</div>
       <div class="btn-row">
         <button class="btn btn-secondary" id="pauseBtn">Pause</button>
         <button class="btn btn-stop" id="stopBtn">Stop</button>
@@ -139,17 +163,40 @@
 
     <div class="result" id="result">
       <video id="preview" controls></video>
-      <p class="meta" id="resultMeta"></p>
+      <p class="details" id="details"></p>
+
+      <h2>Save as</h2>
+      <fieldset class="presets" id="presets"></fieldset>
+      <p class="note" id="exportNote"></p>
+      <div class="row">
+        <label for="formatSelect">Format</label>
+        <select id="formatSelect"></select>
+      </div>
+
+      <div class="progress" id="progress">
+        <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+        <div class="progress-row">
+          <span id="progressText">Making the file...</span>
+          <button id="cancelExportBtn">Cancel</button>
+        </div>
+      </div>
+
+      <div class="saved" id="saved">
+        <span id="savedText"></span>
+        <button id="showFileBtn">Show file</button>
+      </div>
+
       <div class="btn-row">
-        <button class="btn btn-secondary" id="showFileBtn">Show file</button>
-        <button class="btn" id="againBtn">New recording</button>
+        <button class="btn" id="saveBtn">Save</button>
+        <button class="btn btn-secondary" id="againBtn">New recording</button>
       </div>
     </div>
 
     <ul class="info">
       <li>Firefox asks what to share after you click Start.</li>
+      <li>File size depends on quality and length. The size so far shows while you record.</li>
+      <li>When you stop, you can save the recording as it is or a smaller copy.</li>
       <li>Firefox does not supply system or tab sound at this time. Use the microphone for narration.</li>
-      <li>The file saves to your Downloads folder when you stop. Keep this tab open while you record.</li>
     </ul>
   </div>
 

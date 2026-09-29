@@ -5,12 +5,14 @@
   "description": "Firefox extension for screenshots, screen recording and image annotation.",
   "license": "AGPL-3.0-only",
   "scripts": {
-    "test": "node --test test/*.test.js",
+    "test": "node --test --test-concurrency=1 test/*.test.js",
     "lint": "web-ext lint --source-dir src",
     "start": "web-ext run --source-dir src",
-    "build": "web-ext build --source-dir src --artifacts-dir dist --overwrite-dest"
+    "build": "web-ext build --source-dir src --artifacts-dir dist --overwrite-dest",
+    "vendor": "node scripts/vendor.js"
   },
   "devDependencies": {
+    "mediabunny": "1.61.0",
     "playwright-core": "1.56",
     "web-ext": "^8.10.0"
   }

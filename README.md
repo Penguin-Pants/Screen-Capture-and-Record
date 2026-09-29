@@ -22,8 +22,10 @@ Based on ScreenCapture Pro 1.0.1. The original source is in the first commit of 
 
 **Recorder**
 - Screen, window or tab, with optional microphone
-- Pause and resume, countdown, format, quality and frame rate
-- Toolbar badge while recording
+- Quality presets (resolution limit, frame rate, bitrate) with an estimate in MB per minute
+- Live file size while recording; pause and resume; countdown; toolbar badge
+- After recording, a review screen: save the recording as it is, or a smaller copy from a preset (each with its estimated size), as WebM or MP4 where the browser can encode it
+- Settings: default quality, and "review first" or "save at once"
 
 ## Requirements
 
@@ -44,6 +46,7 @@ npm install
 | `npm run lint` | Run `web-ext lint` on `src/` |
 | `npm start` | Start Firefox with the extension loaded (`web-ext run`) |
 | `npm run build` | Make an unsigned ZIP in `dist/` |
+| `npm run vendor` | Copy third-party browser code from `node_modules` to `src/vendor` |
 
 Page tests run the extension pages in Chromium with a stub of the Firefox `browser` API (`test/browser-stub.js`). Set `CHROMIUM_PATH` if Chromium is not at the Playwright default path. Without Chromium, the page tests are skipped.
 
@@ -64,7 +67,7 @@ The automated tests cannot call Firefox-only APIs (`tabs.captureTab`, notificati
 3. **Full page:** open a long page (for example a Wikipedia article). Press `Alt+Shift+F`. Check that the header shows once, the bottom is not repeated and text is sharp on a HiDPI screen.
 4. **Save to Downloads:** in the popup, set **After capture** to **Save to Downloads**. Capture. A notification shows. Click it to show the file.
 5. **Clipboard:** set **After capture** to **Copy to clipboard**. Capture, then paste in another app.
-6. **Recorder:** record 10 s with the microphone, pause and resume once, stop. The file saves and the microphone indicator in the Firefox address bar goes off.
+6. **Recorder:** record 10 s with the microphone, pause and resume once, stop. The review screen opens and the microphone indicator in the Firefox address bar goes off. Save a "Medium" copy: the file is smaller than the recording and seeking works in a video player.
 7. **Protected page:** open `about:addons`. The popup capture buttons are disabled.
 
 ## Project layout
@@ -79,12 +82,19 @@ src/            Extension source (load this folder in Firefox)
   editor.*        Image editor
   recorder.*      Screen recorder
   options.*       Settings page
-test/           Unit tests (Node) and page tests (Chromium)
+  vendor/         Third-party code, unmodified (Mediabunny)
+scripts/        Maintenance scripts (npm run vendor)
+test/           Unit tests (Node) and page tests (Chromium, served over local HTTP)
 docs/           Reverse-engineering report
 ```
 
 ## Known limitations
 
 - Firefox gives no system or tab audio to `getDisplayMedia`. Recordings can include the microphone only.
-- WebM files from `MediaRecorder` have no duration in their header. Some players cannot seek in them until they are remuxed.
+- Smaller copies need the WebCodecs API (Firefox 130 or later). Older versions can save the recording as it is.
+- Size estimates are approximate. Encoders can go a little above the target bitrate (estimates add 10%), and screens with little motion often make smaller files.
 - Full page captures the main document scroll. Pages that scroll inside an inner element capture only the visible part of that element.
+
+## Third-party code
+
+- [Mediabunny](https://mediabunny.dev/) 1.61.0 (MPL-2.0) in `src/vendor/mediabunny`, copied unmodified from the npm package by `npm run vendor`. The recorder uses it to add a duration index to recordings and to make smaller copies.

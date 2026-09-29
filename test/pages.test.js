@@ -1,51 +1,14 @@
-// Page tests: run the extension pages in Chromium with a stub of the
-// Firefox "browser" API (test/browser-stub.js). Firefox-only behavior
-// (captureTab, notifications, real downloads) is not covered here.
+// Page tests for the editor, popup, options page and capture code. They run
+// in Chromium with a stub of the Firefox "browser" API. Firefox-only
+// behavior (captureTab, notifications, real downloads) is not covered here.
 'use strict';
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
 const path = require('node:path');
-const { pathToFileURL } = require('node:url');
+const { skip, SRC, useBrowser } = require('./harness.js');
 
-let chromium;
-try {
-  ({ chromium } = require('playwright-core'));
-} catch {
-  chromium = null;
-}
-
-const SRC = path.join(__dirname, '..', 'src');
-const STUB = path.join(__dirname, 'browser-stub.js');
-const CHROMIUM_CANDIDATES = [
-  process.env.CHROMIUM_PATH,
-  '/opt/pw-browsers/chromium-1194/chrome-linux/chrome'
-].filter(Boolean);
-const executablePath = CHROMIUM_CANDIDATES.find((candidate) => fs.existsSync(candidate));
-const skip = !chromium || !executablePath ? 'Chromium or playwright-core not available (set CHROMIUM_PATH)' : false;
-
-const pageUrl = (file, query = '') => pathToFileURL(path.join(SRC, file)).href + query;
-
-let browser;
-test.before(async () => {
-  if (skip) return;
-  browser = await chromium.launch({ executablePath, args: ['--autoplay-policy=no-user-gesture-required'] });
-});
-test.after(async () => {
-  if (browser) await browser.close();
-});
-
-async function openPage(file, query = '', init) {
-  const context = await browser.newContext({ viewport: { width: 1400, height: 900 } });
-  await context.addInitScript({ path: STUB });
-  if (init) await context.addInitScript(init);
-  const page = await context.newPage();
-  const errors = [];
-  page.on('pageerror', (error) => errors.push(error));
-  await page.goto(pageUrl(file, query));
-  return { page, context, errors };
-}
+const openPage = useBrowser();
 
 const pixel = (page, x, y) => page.evaluate(([px, py]) => Array.from(ctx.getImageData(px, py, 1, 1).data), [x, y]);
 
@@ -342,76 +305,6 @@ test('popup sends capture requests and disables them on protected pages', { skip
   await opened.context.close();
 });
 
-// Fake screen and microphone streams: an animated canvas and an oscillator.
-const fakeMedia = () => {
-  window.__opened = [];
-  navigator.mediaDevices.getDisplayMedia = async () => {
-    const source = document.createElement('canvas');
-    source.width = 320;
-    source.height = 240;
-    const sctx = source.getContext('2d');
-    let frame = 0;
-    setInterval(() => { sctx.fillStyle = `hsl(${frame++ * 10}, 80%, 50%)`; sctx.fillRect(0, 0, 320, 240); }, 30);
-    const stream = source.captureStream(30);
-    window.__opened.push(stream);
-    return stream;
-  };
-  navigator.mediaDevices.getUserMedia = async () => {
-    const audio = new AudioContext();
-    const oscillator = audio.createOscillator();
-    const destination = audio.createMediaStreamDestination();
-    oscillator.connect(destination);
-    oscillator.start();
-    window.__opened.push(destination.stream);
-    return destination.stream;
-  };
-};
-
-test('recorder records, pauses, saves and stops every track', { skip }, async () => {
-  const { page, context, errors } = await openPage('recorder.html', '', fakeMedia);
-  await page.waitForFunction(() => document.getElementById('formatSelect').options.length > 0);
-  await page.selectOption('#countdownSelect', '0');
-  await page.check('#micCheck');
-  await page.click('#startBtn');
-  await page.waitForFunction(() => document.getElementById('live').classList.contains('active'));
-  await page.waitForTimeout(1200);
-  await page.click('#pauseBtn');
-  assert.equal(await page.textContent('#recLabel'), 'Paused');
-  const pausedAt = await page.textContent('#timer');
-  await page.waitForTimeout(1200);
-  assert.equal(await page.textContent('#timer'), pausedAt, 'timer stops while paused');
-  await page.click('#pauseBtn');
-  await page.waitForTimeout(800);
-  await page.click('#stopBtn');
-  await page.waitForFunction(() => window.__calls.downloads.length === 1);
-
-  const download = await page.evaluate(() => window.__calls.downloads[0]);
-  assert.match(download.filename, /^recording-\d{4}-\d\d-\d\d_\d\d-\d\d-\d\d\.(webm|mp4)$/);
-  assert.ok(download.size > 1000, `recording has data (${download.size} bytes)`);
-  const states = await page.evaluate(() => window.__calls.messages.filter((m) => m.action === 'recordingState').map((m) => m.state));
-  assert.deepEqual(states, ['recording', 'paused', 'recording', 'idle']);
-  const liveTracks = await page.evaluate(() => window.__opened.flatMap((s) => s.getTracks()).filter((t) => t.readyState !== 'ended').length);
-  assert.equal(liveTracks, 0, 'screen and microphone tracks are stopped');
-  assert.equal(await page.evaluate(() => document.getElementById('result').classList.contains('active')), true);
-  assert.deepEqual(errors, []);
-  await context.close();
-});
-
-test('recorder countdown can be cancelled by ending the share', { skip }, async () => {
-  const { page, context } = await openPage('recorder.html', '', fakeMedia);
-  await page.waitForFunction(() => document.getElementById('formatSelect').options.length > 0);
-  await page.selectOption('#countdownSelect', '3');
-  await page.click('#startBtn');
-  await page.waitForFunction(() => document.getElementById('countdown').classList.contains('active'));
-  await page.click('#stopBtn', { force: true }).catch(() => {});
-  await page.evaluate(() => stopRecording());
-  await page.waitForFunction(() => !document.getElementById('countdown').classList.contains('active'));
-  assert.equal(await page.evaluate(() => window.__calls.downloads.length), 0);
-  const liveTracks = await page.evaluate(() => window.__opened.flatMap((s) => s.getTracks()).filter((t) => t.readyState !== 'ended').length);
-  assert.equal(liveTracks, 0);
-  await context.close();
-});
-
 test('remove background clears the edge color and smooths the cut edge', { skip }, async () => {
   const { page, context, errors } = await openEditorWithCapture();
   const result = await page.evaluate(() => {
@@ -588,33 +481,5 @@ test('background drops a capture when the editor tab cannot open', { skip }, asy
   });
   assert.deepEqual(result, { message: 'No such window', size: 0 });
   assert.deepEqual(errors, []);
-  await context.close();
-});
-
-test('recorder never shows the previous file while a new save is pending', { skip }, async () => {
-  const { page, context } = await openPage('recorder.html', '', fakeMedia);
-  await page.waitForFunction(() => document.getElementById('formatSelect').options.length > 0);
-  await page.selectOption('#countdownSelect', '0');
-  const record = async () => {
-    await page.click('#startBtn');
-    await page.waitForFunction(() => document.getElementById('live').classList.contains('active'));
-    await page.waitForTimeout(1100);
-    await page.click('#stopBtn');
-    await page.waitForFunction(() => document.getElementById('result').classList.contains('active'));
-  };
-
-  await record();
-  await page.waitForFunction(() => lastDownloadId === 1 && !document.getElementById('showFileBtn').disabled);
-
-  // The second save stays pending, like an open "Save as" dialog.
-  await page.evaluate(() => { browser.downloads.download = () => new Promise(() => {}); });
-  await page.click('#againBtn');
-  await record();
-  const state = await page.evaluate(() => ({
-    id: lastDownloadId,
-    disabled: document.getElementById('showFileBtn').disabled,
-    meta: document.getElementById('resultMeta').textContent
-  }));
-  assert.deepEqual(state, { id: null, disabled: true, meta: 'Saving...' });
   await context.close();
 });

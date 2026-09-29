@@ -100,6 +100,22 @@
     </div>
 
     <div class="card">
+      <h2>Screen recording</h2>
+      <div class="row">
+        <label for="recordingProfile">Default quality<small>Used for new recordings. You can change it on the recorder page.</small></label>
+        <select id="recordingProfile"></select>
+      </div>
+      <div class="row">
+        <label for="afterRecording">After recording</label>
+        <select id="afterRecording">
+          <option value="review">Show the video and size options first</option>
+          <option value="save">Save at once, as recorded</option>
+        </select>
+      </div>
+      <p class="hint">File size depends on quality and length. The recorder shows the size while you record. After you stop, you can also save a smaller copy.</p>
+    </div>
+
+    <div class="card">
       <h2>Keyboard shortcuts</h2>
       <table class="shortcuts" id="shortcuts"></table>
       <p class="hint">To change a shortcut: open <strong>about:addons</strong>, click the gear icon, then <strong>Manage Extension Shortcuts</strong>.</p>

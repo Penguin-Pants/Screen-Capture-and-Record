@@ -8,6 +8,7 @@
   const clone = (value) => (value === undefined ? value : JSON.parse(JSON.stringify(value)));
 
   window.__calls = calls;
+  window.__downloadBlobs = [];
   window.__store = store;
 
   // A 400x300 test image: red left half, blue right half.
@@ -58,6 +59,7 @@
       async download(options) {
         const blob = await (await fetch(options.url)).blob();
         calls.downloads.push({ filename: options.filename, saveAs: options.saveAs, size: blob.size, type: blob.type });
+        window.__downloadBlobs.push(blob);
         const id = calls.downloads.length;
         setTimeout(() => downloadListeners.forEach((listener) => listener({ id, state: { current: 'complete' } })), 0);
         return id;
