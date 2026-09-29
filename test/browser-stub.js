@@ -33,7 +33,8 @@
       setBadgeBackgroundColor: () => {}
     },
     extension: {
-      getViews: () => window.__views
+      // A fake view can name its tab in __tabId.
+      getViews: (filter = {}) => window.__views.filter((view) => filter.tabId === undefined || view.__tabId === filter.tabId)
     },
     storage: {
       local: {
@@ -90,7 +91,6 @@
         calls.tabsUpdated.push({ id, ...options });
         return { id, windowId: 3 };
       },
-      onUpdated: event(),
       onRemoved: event()
     },
     windows: {

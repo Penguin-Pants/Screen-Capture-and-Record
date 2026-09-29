@@ -94,24 +94,47 @@ test('fast toolbar clicks open one recorder; a click while it loads shows that t
   const { page, context, errors } = await openPage('options.html');
   await page.addScriptTag({ path: path.join(SRC, 'background.js') });
   const result = await page.evaluate(async () => {
+    let nextId = 100;
+    browser.tabs.create = async (options) => {
+      window.__calls.tabsCreated.push(options);
+      return { id: nextId++ };
+    };
+    const state = () => ({
+      created: window.__calls.tabsCreated.length,
+      shown: window.__calls.tabsUpdated.map((update) => update.id)
+    });
+
+    // Fast clicks: one tab (100). The other clicks show it; its page does not exist yet.
     const click = browser.browserAction.onClicked.listeners[0];
     click();
     click();
     await openRecorder(); // a third click, handled after the first two
-    const created = window.__calls.tabsCreated.length;
-    const shown = window.__calls.tabsUpdated.map((update) => update.id);
+    const fast = state();
 
-    // The page has loaded: now the page itself comes to the front.
-    browser.tabs.onUpdated.listeners[0](99, { status: 'complete' });
-    let focused = 0;
-    window.__views.push({ location: { pathname: '/recorder.html' }, focusRecorder: async () => { focused++; } });
+    // 5 s later, tab 100 still loads the recorder page: a click shows it.
+    const now = Date.now;
+    Date.now = () => now() + 5000;
+    const loading = { __tabId: 100, location: { pathname: '/recorder.html' } };
+    window.__views.push(loading);
     await openRecorder();
-    return { created, shown, focused, updatedAfter: window.__calls.tabsUpdated.length };
+    const stillLoading = state();
+
+    // Tab 100 left the recorder page before it loaded: a click opens a new recorder (101).
+    window.__views.splice(window.__views.indexOf(loading), 1);
+    await openRecorder();
+    const left = state();
+
+    // The recorder page in tab 101 is ready: the page itself comes to the front.
+    let focused = 0;
+    window.__views.push({ __tabId: 101, location: { pathname: '/recorder.html' }, focusRecorder: async () => { focused++; } });
+    await openRecorder();
+    return { fast, stillLoading, left, ready: state(), focused };
   });
-  assert.equal(result.created, 1, 'one recorder tab');
-  assert.deepEqual(result.shown, [99, 99], 'the other clicks show the loading tab');
+  assert.deepEqual(result.fast, { created: 1, shown: [100, 100] }, 'one recorder tab');
+  assert.deepEqual(result.stillLoading, { created: 1, shown: [100, 100, 100] });
+  assert.deepEqual(result.left, { created: 2, shown: [100, 100, 100] }, 'a tab that left the page is not shown');
+  assert.deepEqual(result.ready, result.left);
   assert.equal(result.focused, 1);
-  assert.equal(result.updatedAfter, 2);
   assert.deepEqual(errors, []);
   await context.close();
 });
