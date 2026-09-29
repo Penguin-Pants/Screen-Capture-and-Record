@@ -26,6 +26,12 @@ const ui = {
   micHint: $('micHint'),
   micDevice: $('micDevice'),
   micDeviceRow: $('micDeviceRow'),
+  computer: $('computerCheck'),
+  computerSetup: $('computerSetup'),
+  computerMeterFill: $('computerMeterFill'),
+  computerHint: $('computerHint'),
+  computerDevice: $('computerDevice'),
+  computerDeviceRow: $('computerDeviceRow'),
   camera: $('cameraCheck'),
   cameraNote: $('cameraNote'),
   cameraSetup: $('cameraSetup'),
@@ -38,8 +44,10 @@ const ui = {
   timer: $('timer'),
   liveSize: $('liveSize'),
   liveCamera: $('liveCamera'),
-  liveMeter: $('liveMeter'),
-  liveMeterFill: $('liveMeterFill'),
+  liveMicMeter: $('liveMicMeter'),
+  liveMicMeterFill: $('liveMicMeterFill'),
+  liveComputerMeter: $('liveComputerMeter'),
+  liveComputerMeterFill: $('liveComputerMeterFill'),
   recIndicator: $('recIndicator'),
   recLabel: $('recLabel'),
   countdown: $('countdown'),
@@ -76,19 +84,15 @@ let sourceStreams = [];     // Screen streams. All tracks stop at the end.
 let cameraStream = null;    // The webcam stream: preview before and during recording
 let cameraRequest = 0;      // Number of the newest camera request (see startCameraPreview)
 let cameraPending = null;   // The camera request that waits for an answer, if any
-let micStream = null;       // The microphone stream: level meter before and during recording
-let micRequest = 0;         // Number of the newest microphone request (see startMicrophone)
-let micPending = null;      // The microphone request that waits for an answer, if any
-let micError = null;        // Why the newest microphone request failed, if it did
-let meter = null;           // The level meter of the microphone (see startMeter)
+let mixer = null;           // The AudioContext that mixes 2 sound inputs (see mixSound)
 let activeMs = 0;           // Recorded time before the last resume
 let resumedAt = 0;
 let timerInterval = null;
 let cancelCountdown = null;
-let session = null;         // { profile, hasAudio, micPeak, micStopped, startedAt, captureSize }
+let session = null;         // { profile, hasAudio, audioBitsPerSecond, inputs, startedAt, captureSize }
 
 // Review state. recording: { blob, mimeType, seconds, width, height,
-// frameRate, videoBitsPerSecond, hasAudio, audioStatus, camera, baseName, saved }
+// frameRate, videoBitsPerSecond, hasAudio, audioBitsPerSecond, sound, camera, baseName, saved }
 let recording = null;
 let previewUrl = null;
 let previewCameraUrl = null;
@@ -136,7 +140,7 @@ function profileLabel(profile) {
 
 function updateProfileHint() {
   const profile = getRecordingProfile(ui.profile.value);
-  const audio = ui.mic.checked ? VOICE_AUDIO_BITS_PER_SECOND : 0;
+  const audio = ui.computer.checked ? COMPUTER_AUDIO_BITS_PER_SECOND : (ui.mic.checked ? VOICE_AUDIO_BITS_PER_SECOND : 0);
   ui.profileHint.textContent =
     `About ${formatBytes(bytesPerMinute(profile, audio))} per minute. Often less when little moves on the screen.`;
 }
@@ -163,10 +167,13 @@ async function initOptions() {
   ui.profile.value = getRecordingProfile(settings.profile).id;
   ui.countdownSelect.value = String(settings.countdown);
   ui.mic.checked = settings.microphone;
+  ui.computer.checked = settings.computerSound;
   updateProfileHint();
-  // As for the camera: Firefox asks now, and the level meter shows that
-  // the microphone hears you before you record.
-  if (settings.microphone) startMicrophone(settings.microphoneDeviceId);
+  // As for the camera: Firefox asks now, and the level meters show that
+  // the inputs work before you record.
+  for (const input of soundInputs) {
+    if (settings[input.setting]) startSoundInput(input, settings[input.deviceSetting]);
+  }
 
   if (!cameraSupported()) {
     ui.camera.disabled = true;
@@ -181,21 +188,24 @@ async function initOptions() {
   const persist = () => saveSettings({
     profile: ui.profile.value,
     countdown: Number(ui.countdownSelect.value),
-    microphone: ui.mic.checked
+    microphone: ui.mic.checked,
+    computerSound: ui.computer.checked
   });
-  [ui.profile, ui.countdownSelect, ui.mic].forEach((el) => el.addEventListener('change', () => {
+  [ui.profile, ui.countdownSelect, ui.mic, ui.computer].forEach((el) => el.addEventListener('change', () => {
     updateProfileHint();
     persist();
   }));
 
-  ui.mic.addEventListener('change', () => {
-    if (ui.mic.checked) ensureMicrophone();
-    else stopMicrophone();
-  });
-  ui.micDevice.addEventListener('change', () => {
-    saveSettings({ microphoneDeviceId: ui.micDevice.value });
-    startMicrophone(ui.micDevice.value);
-  });
+  for (const input of soundInputs) {
+    input.ui.check.addEventListener('change', () => {
+      if (input.ui.check.checked) ensureSoundInput(input);
+      else stopSoundInput(input);
+    });
+    input.ui.device.addEventListener('change', () => {
+      saveSettings({ [input.deviceSetting]: input.ui.device.value });
+      startSoundInput(input, input.ui.device.value);
+    });
+  }
 
   ui.camera.addEventListener('change', () => {
     saveSettings({ camera: ui.camera.checked });
@@ -294,179 +304,269 @@ async function fillCameraDevices() {
   ui.cameraDeviceRow.style.display = devices.length > 1 ? '' : 'none';
 }
 
-// ------------------------------------------------------------ Microphone
+// ----------------------------------------------------------- Sound inputs
 
-// Echo cancellation, noise suppression and automatic gain control make a
-// voice clear. Firefox uses them by default too.
-const MIC_PROCESSING = { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
 // The level meter shows -60 dB (empty) to 0 dB (full). A normal voice
 // fills about half of the bar.
 const METER_FLOOR_DB = -60;
-// Below this level (about -70 dB), the microphone gives no usable sound.
-// A muted microphone, or one that the system does not let Firefox use,
-// gives zeros.
+// Below this level (about -70 dB), an input gives no usable sound. A muted
+// input, or one that the system does not let Firefox use, gives zeros.
 const SILENCE_LEVEL = 0.0003;
-// Time without sound before the hint tells you to check the microphone.
+// Time without sound before the hint tells you to check the input.
 const SILENCE_HINT_MS = 3000;
-const MIC_HINT = 'Talk to test the microphone. The bar moves when it hears you.';
-const MIC_SILENT_HINT = 'No sound from this microphone. If the bar does not move when you talk, choose another ' +
-  'microphone, make sure that it is not muted, and make sure that your system settings let Firefox use it.';
-const AUDIO_WARNINGS = {
-  silent: 'The microphone gave no sound during this recording. Before you record again, talk and look at the ' +
-    'level bar under "Include microphone".',
-  stopped: 'The microphone stopped during this recording. Part of the video has no sound.'
+// Names of loopback devices, which record the sound that the computer
+// plays: Stereo Mix on Windows (also in some other languages), virtual
+// cables, BlackHole and Soundflower on macOS, and monitors on Linux.
+const LOOPBACK_NAMES = /stereo ?mix|mixage st|mezcla est|missaggio|what u hear|wave ?out mix|loopback|cable output|voicemeeter|blackhole|soundflower|monitor of/i;
+const BLOCK_HELP = 'If Firefox does not ask, click the microphone icon in the address bar, remove the block, then ' +
+  'reload this page.';
+
+// The two sound inputs. Firefox gives no tab or system sound to screen
+// sharing, so the computer sound comes from a loopback device, which
+// Firefox shows as a microphone. Each input has a checkbox, a level meter,
+// a hint and a device list. The stream opens when the option is ticked
+// (Firefox asks then), and the same stream is recorded later. As for the
+// camera (see startCameraPreview), each request gets a number, and the
+// answer to an old request is not used.
+const microphone = {
+  ui: {
+    check: ui.mic, setup: ui.micSetup, meterFill: ui.micMeterFill, hint: ui.micHint, device: ui.micDevice,
+    deviceRow: ui.micDeviceRow, liveMeter: ui.liveMicMeter, liveMeterFill: ui.liveMicMeterFill
+  },
+  setting: 'microphone',
+  deviceSetting: 'microphoneDeviceId',
+  // Echo cancellation, noise suppression and automatic gain control make a
+  // voice clear. Firefox uses them by default too.
+  constraints: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+  texts: {
+    deviceName: 'Microphone',
+    hint: 'Talk to test the microphone. The bar moves when it hears you.',
+    silentHint: 'No sound from this microphone. If the bar does not move when you talk, choose another ' +
+      'microphone, make sure that it is not muted, and make sure that your system settings let Firefox use it.',
+    noMeter: 'The level meter is not available. The microphone records.',
+    notAllowed: 'Firefox did not allow the microphone. To record your voice, tick "Include microphone" and allow ' +
+      `the microphone. ${BLOCK_HELP}`,
+    notFound: 'Firefox found no microphone. Connect a microphone, then tick "Include microphone".',
+    notAvailable: 'The microphone is not available',
+    question: 'Record without the microphone?',
+    stoppedSetup: 'The microphone stopped (for example, it was unplugged). Check the microphone before you record.',
+    stoppedLive: 'The microphone stopped. The rest of the video has no sound from the microphone.',
+    silentWarning: 'The microphone gave no sound during this recording. Before you record again, talk and look ' +
+      'at the level bar under "Include microphone".',
+    stoppedWarning: 'The microphone stopped during this recording. Part of the video has no sound from the microphone.',
+    silentNote: 'no sound from the microphone',
+    stoppedNote: 'microphone stopped'
+  },
+  stream: null, request: 0, pending: null, error: null, meter: null
 };
 
-// Open the microphone for the level meter. The same stream is recorded
-// later, so Firefox asks for permission only once. As for the camera (see
-// startCameraPreview), each request gets a number, and the answer to an
-// old request is not used.
-function startMicrophone(deviceId) {
-  stopMicrophone();
-  micError = null;
-  const request = ++micRequest;
-  const pending = openMicrophone(request, deviceId).finally(() => {
-    if (micPending === pending) micPending = null;
+const computerSound = {
+  ui: {
+    check: ui.computer, setup: ui.computerSetup, meterFill: ui.computerMeterFill, hint: ui.computerHint,
+    device: ui.computerDevice, deviceRow: ui.computerDeviceRow, liveMeter: ui.liveComputerMeter,
+    liveMeterFill: ui.liveComputerMeterFill
+  },
+  setting: 'computerSound',
+  deviceSetting: 'computerSoundDeviceId',
+  // The computer sound is not a voice: no voice filters, and stereo.
+  constraints: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: { ideal: 2 } },
+  // Without a saved device, use the first loopback device. The right
+  // device is rarely the default one, so the list always shows.
+  findDevice: (devices) => devices.find((device) => LOOPBACK_NAMES.test(device.label)),
+  alwaysShowDevices: true,
+  texts: {
+    deviceName: 'Sound input',
+    hint: 'Play a sound on the computer. The bar moves when the device hears it.',
+    silentHint: 'No sound from this device. Play a sound on the computer. If the bar does not move, choose your ' +
+      'loopback device (for example, Stereo Mix) in the list.',
+    sameDevice: 'This is the device of your microphone. Choose your loopback device (for example, Stereo Mix) in ' +
+      'the list.',
+    noMeter: 'The level meter is not available. The computer sound records.',
+    notAllowed: 'Firefox did not allow the sound device. To record the computer sound, tick "Include computer ' +
+      `sound" and allow the device. ${BLOCK_HELP}`,
+    notFound: 'Firefox found no sound device. Set up a loopback device (see "How to set up computer sound"), then ' +
+      'tick "Include computer sound".',
+    notAvailable: 'The computer sound device is not available',
+    question: 'Record without the computer sound?',
+    stoppedSetup: 'The computer sound device stopped. Check the device before you record.',
+    stoppedLive: 'The computer sound device stopped. The rest of the video has no computer sound.',
+    silentWarning: 'No computer sound was recorded. If the computer played sound, check the device under ' +
+      '"Include computer sound".',
+    stoppedWarning: 'The computer sound device stopped during this recording. Part of the video has no computer sound.',
+    silentNote: 'no computer sound',
+    stoppedNote: 'computer sound stopped'
+  },
+  stream: null, request: 0, pending: null, error: null, meter: null
+};
+
+const soundInputs = [microphone, computerSound];
+
+function startSoundInput(input, deviceId) {
+  stopSoundInput(input);
+  input.error = null;
+  const request = ++input.request;
+  const pending = openSoundInput(input, request, deviceId).finally(() => {
+    if (input.pending === pending) input.pending = null;
   });
-  micPending = pending;
+  input.pending = pending;
   return pending;
 }
 
-async function openMicrophone(request, deviceId) {
+async function openSoundInput(input, request, deviceId) {
+  const open = (id) => navigator.mediaDevices.getUserMedia({
+    audio: id ? { ...input.constraints, deviceId: { exact: id } } : input.constraints
+  });
   let stream;
   try {
+    if (!deviceId && input.findDevice) {
+      // Device names show only after permission is given. Without a name
+      // that matches, Firefox lets you choose the device when it asks.
+      const found = input.findDevice(await audioInputDevices());
+      if (request !== input.request) return;
+      deviceId = found ? found.deviceId : '';
+    }
     try {
-      stream = await navigator.mediaDevices.getUserMedia({
-        audio: deviceId ? { ...MIC_PROCESSING, deviceId: { exact: deviceId } } : MIC_PROCESSING
-      });
+      stream = await open(deviceId);
     } catch (error) {
       if (!deviceId || error.name !== 'OverconstrainedError') throw error;
-      // The saved microphone is gone. Use the default microphone.
-      stream = await navigator.mediaDevices.getUserMedia({ audio: MIC_PROCESSING });
+      // The saved device is gone. Use the default device.
+      stream = await open('');
     }
   } catch (error) {
-    if (request !== micRequest) return;
-    micError = error;
-    ui.mic.checked = false;
-    saveSettings({ microphone: false });
+    if (request !== input.request) return;
+    input.error = error;
+    input.ui.check.checked = false;
+    saveSettings({ [input.setting]: false });
     updateProfileHint();
-    updateMicSetup();
-    showMessage(microphoneErrorText(error), 'error');
+    updateSoundInputSetup(input);
+    showMessage(soundInputErrorText(input, error), 'error');
     return;
   }
-  if (request !== micRequest) {
+  if (request !== input.request) {
     stream.getTracks().forEach((track) => track.stop());
     return;
   }
-  micStream = stream;
-  stream.getAudioTracks().forEach((track) => track.addEventListener('ended', onMicrophoneEnded));
-  startMeter(stream);
-  updateMicSetup();
-  await fillMicDevices();
+  input.stream = stream;
+  stream.getAudioTracks().forEach((track) => track.addEventListener('ended', (event) => onSoundInputEnded(input, event)));
+  startMeter(input);
+  updateSoundInputSetup(input);
+  await fillSoundInputDevices(input);
 }
 
-function microphoneErrorText(error) {
-  if (error.name === 'NotAllowedError') {
-    return 'Firefox did not allow the microphone. To record your voice, tick "Include microphone" and allow the ' +
-      'microphone. If Firefox does not ask, click the microphone icon in the address bar, remove the block, then ' +
-      'reload this page.';
-  }
-  if (error.name === 'NotFoundError') {
-    return 'Firefox found no microphone. Connect a microphone, then tick "Include microphone".';
-  }
-  return `The microphone is not available (${error.message}). Make sure that no other app uses it and that your ` +
+function soundInputErrorText(input, error) {
+  if (error.name === 'NotAllowedError') return input.texts.notAllowed;
+  if (error.name === 'NotFoundError') return input.texts.notFound;
+  return `${input.texts.notAvailable} (${error.message}). Make sure that no other app uses it and that your ` +
     'system settings let Firefox use it.';
 }
 
-// Open the microphone if the option is on and no microphone is open or
-// opening. Resolves when the newest microphone request has its answer.
-async function ensureMicrophone() {
-  if (ui.mic.checked && !micStream && !micPending) {
-    const { microphoneDeviceId } = await getSettings();
-    if (ui.mic.checked && !micStream && !micPending) startMicrophone(microphoneDeviceId);
+// Open the input if its option is on and no stream is open or opening.
+// Resolves when the newest request has its answer.
+async function ensureSoundInput(input) {
+  if (input.ui.check.checked && !input.stream && !input.pending) {
+    const settings = await getSettings();
+    if (input.ui.check.checked && !input.stream && !input.pending) startSoundInput(input, settings[input.deviceSetting]);
   }
-  while (micPending) await micPending;
+  while (input.pending) await input.pending;
 }
 
-function stopMicrophone() {
-  // A microphone request that has no answer yet is no longer wanted.
-  micRequest++;
-  micPending = null;
-  stopMeter();
-  if (micStream) micStream.getTracks().forEach((track) => track.stop());
-  micStream = null;
-  updateMicSetup();
+function stopSoundInput(input) {
+  // A request that has no answer yet is no longer wanted.
+  input.request++;
+  input.pending = null;
+  stopMeter(input);
+  if (input.stream) input.stream.getTracks().forEach((track) => track.stop());
+  input.stream = null;
+  updateSoundInputSetup(input);
 }
 
-function updateMicSetup() {
-  ui.micSetup.classList.toggle('show', Boolean(ui.mic.checked && micStream));
+function updateSoundInputSetup(input) {
+  input.ui.setup.classList.toggle('show', Boolean(input.ui.check.checked && input.stream));
 }
 
-// Microphone names show only after permission is given. The list shows
-// only when there is more than one microphone.
-async function fillMicDevices() {
-  const devices = (await navigator.mediaDevices.enumerateDevices()).filter((device) => device.kind === 'audioinput');
-  ui.micDevice.replaceChildren(...devices.map((device, index) => new Option(device.label || `Microphone ${index + 1}`, device.deviceId)));
-  const track = micStream && micStream.getAudioTracks()[0];
-  const current = track && track.getSettings().deviceId;
-  if (current && devices.some((device) => device.deviceId === current)) ui.micDevice.value = current;
-  ui.micDeviceRow.style.display = devices.length > 1 ? '' : 'none';
+async function audioInputDevices() {
+  return (await navigator.mediaDevices.enumerateDevices()).filter((device) => device.kind === 'audioinput');
 }
 
-// The microphone stopped, for example because it was unplugged. (A track
-// that we stop ourselves gives no "ended" event.)
-function onMicrophoneEnded(event) {
-  if (!micStream || !micStream.getAudioTracks().includes(event.target)) return;
+// The device of an open input, if the browser tells it.
+function soundInputDeviceId(input) {
+  const track = input.stream && input.stream.getAudioTracks()[0];
+  return track ? track.getSettings().deviceId : undefined;
+}
+
+// Device names show only after permission is given.
+async function fillSoundInputDevices(input) {
+  const devices = await audioInputDevices();
+  input.ui.device.replaceChildren(...devices.map((device, index) =>
+    new Option(device.label || `${input.texts.deviceName} ${index + 1}`, device.deviceId)));
+  const current = soundInputDeviceId(input);
+  if (current && devices.some((device) => device.deviceId === current)) input.ui.device.value = current;
+  input.ui.deviceRow.style.display = input.alwaysShowDevices || devices.length > 1 ? '' : 'none';
+}
+
+// The input that a recording uses, with its values (see startRecording).
+function recordedInput(input) {
+  return session && mediaRecorder ? session.inputs.find((item) => item.input === input) : undefined;
+}
+
+// An input stopped, for example because it was unplugged. (A track that
+// we stop ourselves gives no "ended" event.)
+function onSoundInputEnded(input, event) {
+  if (!input.stream || !input.stream.getAudioTracks().includes(event.target)) return;
   if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-    session.micStopped = true;
-    showMessage('The microphone stopped. The rest of the video has no sound.', 'error');
+    const recorded = recordedInput(input);
+    if (recorded) {
+      recorded.stopped = true;
+      showMessage(input.texts.stoppedLive, 'error');
+    }
     return;
   }
-  // Before recording: open the microphone again (the default microphone,
-  // if the chosen one is gone).
-  stopMicrophone();
-  showMessage('The microphone stopped (for example, it was unplugged). Check the microphone before you record.', 'error');
-  ensureMicrophone();
+  // Before recording: open the input again (the default device, if the
+  // chosen one is gone).
+  stopSoundInput(input);
+  showMessage(input.texts.stoppedSetup, 'error');
+  ensureSoundInput(input);
 }
 
-// Level meter: an analyser reads the microphone 10 times a second. The
-// same values tell when the microphone gives no sound.
-function startMeter(stream) {
-  stopMeter();
+// Level meter: an analyser reads the input 10 times a second. The same
+// values tell when the input gives no sound.
+function startMeter(input) {
+  stopMeter(input);
   let context = null;
   try {
     context = new AudioContext();
     const analyser = context.createAnalyser();
     analyser.fftSize = 2048;
-    context.createMediaStreamSource(stream).connect(analyser);
-    meter = { context, analyser, data: new Float32Array(analyser.fftSize), heardAt: Date.now(), timer: 0 };
+    context.createMediaStreamSource(input.stream).connect(analyser);
+    input.meter = { context, analyser, data: new Float32Array(analyser.fftSize), heardAt: Date.now(), timer: 0 };
   } catch (error) {
-    // Without the meter, the microphone still records.
+    // Without the meter, the input still records.
     console.warn('Could not start the level meter:', error);
     if (context) context.close().catch(() => {});
-    ui.micSetup.classList.add('no-meter');
-    ui.micHint.textContent = 'The level meter is not available. The microphone records.';
-    ui.micHint.classList.remove('warn');
+    input.ui.setup.classList.add('no-meter');
+    input.ui.hint.textContent = input.texts.noMeter;
+    input.ui.hint.classList.remove('warn');
     return;
   }
-  ui.micSetup.classList.remove('no-meter');
+  input.ui.setup.classList.remove('no-meter');
   // A new AudioContext can start "suspended" (autoplay rules). The click on
   // Start also resumes it.
-  meter.context.resume().catch(() => {});
-  meter.timer = setInterval(updateMeter, 100);
-  setMicHint(false);
+  input.meter.context.resume().catch(() => {});
+  input.meter.timer = setInterval(() => updateMeter(input), 100);
+  setHint(input, false);
 }
 
-function stopMeter() {
-  if (!meter) return;
-  clearInterval(meter.timer);
-  meter.context.close().catch(() => {});
-  meter = null;
-  ui.micMeterFill.style.width = '0';
-  ui.liveMeterFill.style.width = '0';
+function stopMeter(input) {
+  if (!input.meter) return;
+  clearInterval(input.meter.timer);
+  input.meter.context.close().catch(() => {});
+  input.meter = null;
+  input.ui.meterFill.style.width = '0';
+  input.ui.liveMeterFill.style.width = '0';
 }
 
-function updateMeter() {
+function updateMeter(input) {
+  const { meter } = input;
   const now = Date.now();
   if (meter.context.state !== 'running') {
     // No values yet: do not judge the sound.
@@ -478,29 +578,60 @@ function updateMeter() {
   for (const value of meter.data) peak = Math.max(peak, Math.abs(value));
   const decibels = peak > 0 ? 20 * Math.log10(peak) : -Infinity;
   const width = `${Math.round(Math.min(1, Math.max(0, 1 - decibels / METER_FLOOR_DB)) * 100)}%`;
-  ui.micMeterFill.style.width = width;
-  ui.liveMeterFill.style.width = width;
+  input.ui.meterFill.style.width = width;
+  input.ui.liveMeterFill.style.width = width;
 
   if (peak >= SILENCE_LEVEL) meter.heardAt = now;
-  setMicHint(now - meter.heardAt >= SILENCE_HINT_MS);
-  if (session && mediaRecorder && mediaRecorder.state === 'recording') {
-    session.micPeak = Math.max(session.micPeak || 0, peak);
+  setHint(input, now - meter.heardAt >= SILENCE_HINT_MS);
+  const recorded = recordedInput(input);
+  if (recorded && mediaRecorder.state === 'recording') recorded.peak = Math.max(recorded.peak || 0, peak);
+}
+
+function setHint(input, silent) {
+  let text = silent ? input.texts.silentHint : input.texts.hint;
+  let warn = silent;
+  // The computer sound needs another device than the microphone.
+  const device = soundInputDeviceId(input);
+  if (input.texts.sameDevice && device && device === soundInputDeviceId(microphone)) {
+    text = input.texts.sameDevice;
+    warn = true;
   }
+  if (input.ui.hint.textContent !== text) input.ui.hint.textContent = text;
+  input.ui.hint.classList.toggle('warn', warn);
 }
 
-function setMicHint(silent) {
-  const text = silent ? MIC_SILENT_HINT : MIC_HINT;
-  if (ui.micHint.textContent !== text) ui.micHint.textContent = text;
-  ui.micHint.classList.toggle('warn', silent);
+// Mix the sound inputs into one track: a MediaRecorder records only one
+// sound track. A suspended mixer gives silence, so it must run.
+async function mixSound(inputs) {
+  if (!mixer) mixer = new AudioContext();
+  await Promise.race([mixer.resume(), new Promise((resolve) => setTimeout(resolve, 1000))]);
+  if (mixer.state !== 'running') throw new Error(`the mixer is ${mixer.state}`);
+  const destination = mixer.createMediaStreamDestination();
+  for (const input of inputs) mixer.createMediaStreamSource(input.stream).connect(destination);
+  return destination.stream.getAudioTracks()[0];
 }
 
-// The sound of a recording: 'none' (no microphone), 'silent' (the
-// microphone gave no sound), 'stopped' (the microphone stopped during the
-// recording) or 'ok'. Without level values, the sound is not judged.
-function audioStatusFor(s) {
-  if (!s.hasAudio) return 'none';
-  if (s.micPeak !== null && s.micPeak < SILENCE_LEVEL) return 'silent';
-  return s.micStopped ? 'stopped' : 'ok';
+function closeMixer() {
+  if (mixer) mixer.close().catch(() => {});
+  mixer = null;
+}
+
+// Problems with the sound of a recording: warnings for the review, and
+// notes for the line under the video. Without level values, an input is
+// not judged.
+function soundProblems(s) {
+  if (!s.hasAudio) return { warnings: [], notes: ['no sound'] };
+  const problems = { warnings: [], notes: [] };
+  for (const { input, peak, stopped } of s.inputs) {
+    if (peak !== null && peak < SILENCE_LEVEL) {
+      problems.warnings.push(input.texts.silentWarning);
+      problems.notes.push(input.texts.silentNote);
+    } else if (stopped) {
+      problems.warnings.push(input.texts.stoppedWarning);
+      problems.notes.push(input.texts.stoppedNote);
+    }
+  }
+  return problems;
 }
 
 function chooseMimeType(hasAudio) {
@@ -560,20 +691,28 @@ function whenStopped(recorder) {
 async function startRecording() {
   clearMessage();
   ui.start.disabled = true;
-  // The click lets a suspended level meter start (autoplay rules).
-  if (meter) meter.context.resume().catch(() => {});
-  // The microphone is wanted until you agree to record without sound.
-  let wantMicrophone = ui.mic.checked;
-  // Waits for the answer to an open microphone request. Resolves false when
-  // the microphone failed and you do not want to record without sound.
-  const microphoneReady = async () => {
-    await ensureMicrophone();
-    if (!wantMicrophone || micStream || !micError) return true;
-    if (!window.confirm(`${microphoneErrorText(micError)}\n\nRecord without sound?`)) return false;
-    wantMicrophone = false;
+  // The click lets suspended level meters start (autoplay rules).
+  for (const input of soundInputs) {
+    if (input.meter) input.meter.context.resume().catch(() => {});
+  }
+  // The inputs that you want, until you agree to record without one.
+  const wanted = new Set(soundInputs.filter((input) => input.ui.check.checked));
+  // Waits for the answers to open sound input requests. Resolves false when
+  // an input failed and you do not want to record without it.
+  const soundReady = async () => {
+    for (const input of soundInputs) {
+      await ensureSoundInput(input);
+      if (!wanted.has(input) || input.stream || !input.error) continue;
+      if (!window.confirm(`${soundInputErrorText(input, input.error)}\n\n${input.texts.question}`)) return false;
+      wanted.delete(input);
+    }
     return true;
   };
   try {
+    // With 2 sound inputs, a mixer makes one sound track (see mixSound). It
+    // is made here, in the click, so autoplay rules let it run.
+    closeMixer();
+    if (wanted.size > 1) mixer = new AudioContext();
     const profile = getRecordingProfile(ui.profile.value);
     // Video only: Firefox gives no tab or system sound to screen sharing.
     const displayStream = await navigator.mediaDevices.getDisplayMedia({ video: displayConstraints(profile) });
@@ -583,16 +722,17 @@ async function startRecording() {
     const videoTrack = displayStream.getVideoTracks()[0];
     videoTrack.addEventListener('ended', stopRecording);
 
-    // If a camera or microphone request is open (for example, from page
+    // If a camera or sound input request is open (for example, from page
     // load), wait for it. A second request would make Firefox ask again.
-    // A recording without sound starts only when you agree to it.
+    // A recording without a sound input that you want starts only when you
+    // agree to it.
     await ensureCamera();
     const withCamera = Boolean(ui.camera.checked && cameraStream);
     const cancel = () => {
       releaseStreams({ keepDevices: true });
       setView('setup');
     };
-    if (!(await microphoneReady())) {
+    if (!(await soundReady())) {
       cancel();
       return;
     }
@@ -602,31 +742,48 @@ async function startRecording() {
       cancel();
       return;
     }
-    // The microphone can stop during the countdown. Then the page opens it
-    // again (see onMicrophoneEnded), so the stream is made only now.
-    if (!(await microphoneReady())) {
+    // An input can stop during the countdown. Then the page opens it again
+    // (see onSoundInputEnded), so the stream is made only now.
+    if (!(await soundReady())) {
       cancel();
       return;
     }
-    const withMicrophone = Boolean(ui.mic.checked && micStream);
-    const stream = new MediaStream([
-      ...displayStream.getVideoTracks(),
-      ...(withMicrophone ? micStream.getAudioTracks() : [])
-    ]);
-    const hasAudio = withMicrophone;
+    const inputs = soundInputs.filter((input) => input.ui.check.checked && input.stream);
+    if (inputs.length < 2) closeMixer();
+    let audioTracks = inputs.length === 1 ? inputs[0].stream.getAudioTracks() : [];
+    if (inputs.length > 1) {
+      try {
+        audioTracks = [await mixSound(inputs)];
+      } catch (error) {
+        console.warn('Could not mix the sound inputs:', error);
+        closeMixer();
+        if (!window.confirm(`Firefox cannot mix the computer sound with the microphone (${error.message}).\n\n` +
+            'Record with the microphone only?')) {
+          cancel();
+          return;
+        }
+        inputs.splice(1);
+        audioTracks = microphone.stream.getAudioTracks();
+      }
+    }
+    const stream = new MediaStream([...displayStream.getVideoTracks(), ...audioTracks]);
+    const hasAudio = audioTracks.length > 0;
+    // The computer sound (music, for example) gets more bits than a voice.
+    const audioBitsPerSecond = inputs.includes(computerSound) ? COMPUTER_AUDIO_BITS_PER_SECOND : VOICE_AUDIO_BITS_PER_SECOND;
     const mimeType = chooseMimeType(hasAudio);
     const options = { videoBitsPerSecond: profile.videoBitsPerSecond };
     if (mimeType) options.mimeType = mimeType;
-    if (hasAudio) options.audioBitsPerSecond = VOICE_AUDIO_BITS_PER_SECOND;
+    if (hasAudio) options.audioBitsPerSecond = audioBitsPerSecond;
 
     const settings = videoTrack.getSettings ? videoTrack.getSettings() : {};
     session = {
       profile,
       hasAudio,
-      // The loudest microphone level while recording (see updateMeter).
-      // null while the level meter gives no values.
-      micPeak: null,
-      micStopped: false,
+      audioBitsPerSecond: hasAudio ? audioBitsPerSecond : 0,
+      // The recorded sound inputs, each with its loudest level while
+      // recording (see updateMeter; null while its level meter gives no
+      // values) and whether it stopped.
+      inputs: inputs.map((input) => ({ input, peak: null, stopped: false })),
       startedAt: new Date(),
       captureSize: { width: settings.width || 0, height: settings.height || 0 }
     };
@@ -648,8 +805,8 @@ async function startRecording() {
 
     cameraRecorder = null;
     if (withCamera) {
-      // The webcam records to its own file, without sound (the microphone
-      // is in the screen file). The bubble is drawn when you save.
+      // The webcam records to its own file, without sound (the sound is in
+      // the screen file). The bubble is drawn when you save.
       const cameraType = chooseMimeType(false);
       cameraRecorder = new MediaRecorder(cameraStream, {
         videoBitsPerSecond: CAMERA_BITS_PER_SECOND,
@@ -662,7 +819,7 @@ async function startRecording() {
       ui.liveCamera.srcObject = cameraStream;
       ui.liveCamera.classList.add('show');
     }
-    ui.liveMeter.classList.toggle('show', Boolean(withMicrophone && meter));
+    for (const input of soundInputs) input.ui.liveMeter.classList.toggle('show', inputs.includes(input) && Boolean(input.meter));
 
     mediaRecorder.start(1000);
     if (cameraRecorder) cameraRecorder.start(1000);
@@ -721,17 +878,18 @@ function stopRecording() {
   reportState('idle');
 }
 
-// Stop every track of every stream we opened (screen, microphone, camera),
-// so no capture indicator stays on. keepDevices keeps the camera and the
-// microphone open for the next try.
+// Stop every track of every stream we opened (screen, sound inputs,
+// camera) and close the mixer, so no capture indicator stays on.
+// keepDevices keeps the camera and the sound inputs open for the next try.
 function releaseStreams({ keepDevices = false } = {}) {
   for (const stream of sourceStreams) {
     stream.getTracks().forEach((track) => track.stop());
   }
   sourceStreams = [];
+  closeMixer();
   if (!keepDevices) {
     stopCamera();
-    stopMicrophone();
+    soundInputs.forEach(stopSoundInput);
   }
 }
 
@@ -782,7 +940,7 @@ async function finishRecording() {
     setView('setup');
     showMessage('The recording is empty. Nothing was saved.', 'error');
     ensureCamera();
-    ensureMicrophone();
+    soundInputs.forEach(ensureSoundInput);
     return;
   }
 
@@ -813,7 +971,8 @@ async function finishRecording() {
     frameRate: session.profile.frameRate,
     videoBitsPerSecond: session.profile.videoBitsPerSecond,
     hasAudio: session.hasAudio,
-    audioStatus: audioStatusFor(session),
+    audioBitsPerSecond: session.audioBitsPerSecond,
+    sound: soundProblems(session),
     camera: cameraBlob ? { blob: cameraBlob } : null,
     baseName: `recording-${fileTimestamp(session.startedAt)}`,
     saved: false
@@ -823,8 +982,7 @@ async function finishRecording() {
   if (!ui.cameraPosition.value) ui.cameraPosition.value = CAMERA_POSITIONS[0].id;
   ui.cameraSize.value = settings.cameraSize;
   if (!ui.cameraSize.value) ui.cameraSize.value = 'medium';
-  const warning = AUDIO_WARNINGS[recording.audioStatus];
-  if (warning) showMessage(warning, 'error');
+  if (recording.sound.warnings.length > 0) showMessage(recording.sound.warnings.join(' '), 'error');
   renderReview(settings);
   setView('result');
 
@@ -857,15 +1015,14 @@ async function saveAsRecorded(rec) {
     const text = cameraOn()
       ? 'The recording was saved with your camera. You can also save a smaller copy below.'
       : 'The recording was saved as it is. You can also save a smaller copy below.';
-    const warning = AUDIO_WARNINGS[rec.audioStatus];
-    showMessage(warning ? `${text} ${warning}` : text, warning ? 'error' : 'info');
+    const { warnings } = rec.sound;
+    showMessage([text, ...warnings].join(' '), warnings.length > 0 ? 'error' : 'info');
   }
 }
 
 // A problem with the sound stays in view until a new recording starts.
 function resetMessage() {
-  const warning = recording && AUDIO_WARNINGS[recording.audioStatus];
-  if (warning) showMessage(warning, 'error');
+  if (recording && recording.sound.warnings.length > 0) showMessage(recording.sound.warnings.join(' '), 'error');
   else clearMessage();
 }
 
@@ -946,7 +1103,8 @@ function sourceInfo() {
     seconds: recording.seconds,
     bytes: recording.blob.size,
     frameRate: recording.frameRate,
-    hasAudio: recording.hasAudio
+    hasAudio: recording.hasAudio,
+    audioBitsPerSecond: recording.audioBitsPerSecond
   };
 }
 
@@ -1016,8 +1174,7 @@ function renderReview(settings) {
   const parts = [`Length ${formatDuration(rec.seconds)}`];
   if (rec.width) parts.push(`${rec.width} × ${rec.height}`);
   parts.push(formatBytes(rec.blob.size));
-  const sound = { none: 'no sound', silent: 'no sound from the microphone', stopped: 'microphone stopped' }[rec.audioStatus];
-  if (sound) parts.push(sound);
+  parts.push(...rec.sound.notes);
   if (rec.camera) parts.push('with camera');
   ui.details.textContent = parts.join(' · ');
 
@@ -1433,7 +1590,7 @@ ui.again.addEventListener('click', () => {
   clearReview();
   setView('setup');
   ensureCamera();
-  ensureMicrophone();
+  soundInputs.forEach(ensureSoundInput);
 });
 ui.settingsLink.addEventListener('click', () => browser.runtime.openOptionsPage());
 

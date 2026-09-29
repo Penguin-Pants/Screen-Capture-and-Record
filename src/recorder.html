@@ -88,16 +88,21 @@
     .camera-live { display: none; width: 96px; height: 96px; border-radius: 50%; object-fit: cover; background: #222;
                    transform: scaleX(-1); margin: 0 auto 10px; }
     .camera-live.show { display: block; }
-    .mic-setup { display: none; padding: 2px 0 6px 26px; }
-    .mic-setup.show { display: block; }
-    .mic-setup .row { grid-template-columns: 90px 1fr; }
+    .sound-setup { display: none; padding: 2px 0 6px 26px; }
+    .sound-setup.show { display: block; }
+    .sound-setup .row { grid-template-columns: 90px 1fr; }
     .meter { height: 8px; border-radius: 4px; background: #e3e6f0; overflow: hidden; }
     .meter-fill { height: 100%; width: 0; background: #2e9e4f; }
-    .mic-setup.no-meter .meter { display: none; }
-    .mic-hint { color: #555; font-size: 13px; margin-top: 4px; }
-    .mic-hint.warn { color: #8a1c14; }
-    .live-meter { display: none; width: 160px; margin: 0 auto 10px; }
-    .live-meter.show { display: block; }
+    .sound-setup.no-meter .meter { display: none; }
+    .sound-hint { color: #555; font-size: 13px; margin-top: 4px; }
+    .sound-hint.warn { color: #8a1c14; }
+    .sound-help { color: #555; font-size: 13px; }
+    .sound-help a { color: #4b3f9e; }
+    .live-meters { margin: 0 auto 10px; }
+    .live-meter { display: none; grid-template-columns: 90px 160px; gap: 8px; align-items: center; justify-content: center;
+                  font-size: 13px; color: #555; padding: 2px 0; }
+    .live-meter.show { display: grid; }
+    .live-meter span { text-align: right; }
     .camera-row { display: none; }
     .camera-row.show { display: grid; }
     .camera-row .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
@@ -173,13 +178,24 @@
           </select>
         </div>
         <label class="check"><input type="checkbox" id="micCheck"> Include microphone</label>
-        <div class="mic-setup" id="micSetup">
+        <div class="sound-setup" id="micSetup">
           <div class="meter" aria-hidden="true"><div class="meter-fill" id="micMeterFill"></div></div>
-          <p class="mic-hint" id="micHint" role="status"></p>
+          <p class="sound-hint" id="micHint" role="status"></p>
           <div class="row" id="micDeviceRow">
             <label for="micDevice">Microphone</label>
             <select id="micDevice"></select>
           </div>
+        </div>
+        <label class="check"><input type="checkbox" id="computerCheck"> Include computer sound <small>(needs a loopback device, such as Stereo Mix)</small></label>
+        <div class="sound-setup" id="computerSetup">
+          <div class="meter" aria-hidden="true"><div class="meter-fill" id="computerMeterFill"></div></div>
+          <p class="sound-hint" id="computerHint" role="status"></p>
+          <div class="row" id="computerDeviceRow">
+            <label for="computerDevice">Device</label>
+            <select id="computerDevice"></select>
+          </div>
+          <p class="sound-help">Use headphones, so the microphone does not record the computer sound a second time.
+            <a href="https://github.com/Penguin-Pants/Screen-Recorder#record-the-computer-sound" target="_blank" rel="noopener">How to set up computer sound</a></p>
         </div>
         <label class="check"><input type="checkbox" id="cameraCheck"> Include camera <small id="cameraNote">(shows you in a corner of the video)</small></label>
         <div class="camera-setup" id="cameraSetup">
@@ -197,7 +213,10 @@
       <div class="rec-indicator" id="recIndicator"><span class="rec-dot"></span><span id="recLabel">Recording</span></div>
       <div class="timer" id="timer">00:00</div>
       <video class="camera-live" id="liveCamera" autoplay muted playsinline></video>
-      <div class="meter live-meter" id="liveMeter" aria-hidden="true"><div class="meter-fill" id="liveMeterFill"></div></div>
+      <div class="live-meters" aria-hidden="true">
+        <div class="live-meter" id="liveMicMeter"><span>Microphone</span><div class="meter"><div class="meter-fill" id="liveMicMeterFill"></div></div></div>
+        <div class="live-meter" id="liveComputerMeter"><span>Computer</span><div class="meter"><div class="meter-fill" id="liveComputerMeterFill"></div></div></div>
+      </div>
       <div class="live-size" id="liveSize">0 KB so far</div>
       <div class="btn-row">
         <button class="btn btn-secondary" id="pauseBtn">Pause</button>
@@ -252,7 +271,7 @@
       <li>Firefox asks what to share after you click Start.</li>
       <li>File size depends on quality and length. The size so far shows while you record.</li>
       <li>When you stop, you can save the recording as it is or a smaller copy.</li>
-      <li>Firefox records the sound of your microphone only. It cannot record the sound of a tab or of your computer.</li>
+      <li>Firefox does not give the sound of a tab to screen sharing. To record the computer sound, tick Include computer sound and choose a loopback device.</li>
       <li>With the camera on, you choose where your camera shows after you stop.</li>
     </ul>
     <div class="footer-links"><button id="settingsLink">Settings</button></div>

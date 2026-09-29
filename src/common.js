@@ -9,6 +9,8 @@ const SETTINGS_DEFAULTS = Object.freeze({
   countdown: 3,
   microphone: false,
   microphoneDeviceId: '',       // Empty means the default microphone
+  computerSound: false,         // Record the computer sound from a loopback device
+  computerSoundDeviceId: '',    // Empty means the first loopback device
   camera: false,                // Record the webcam too
   cameraDeviceId: '',           // Empty means the default camera
   cameraPosition: 'bottom-right', // A CAMERA_POSITIONS id, or 'hidden'
@@ -36,8 +38,10 @@ const EXPORT_PRESETS = Object.freeze([
   { id: 'tiny', label: 'Tiny', maxWidth: 640, maxHeight: 360, frameRate: 15, videoBitsPerSecond: 250000 }
 ]);
 
-// Opus audio from the microphone: enough for a voice.
+// Opus audio from the microphone: enough for a voice. The computer sound
+// (music, for example) gets more.
 const VOICE_AUDIO_BITS_PER_SECOND = 64000;
+const COMPUTER_AUDIO_BITS_PER_SECOND = 128000;
 // Encoders can go a little above the target bitrate, so export estimates
 // add this margin. Screens with little motion often use less.
 const EXPORT_ESTIMATE_MARGIN = 1.1;
@@ -184,11 +188,13 @@ function fitWithin(width, height, maxWidth, maxHeight) {
   return { width: even(width), height: even(height) };
 }
 
-// Plan a re-encoded copy of a recording.
-// source: { width, height, seconds, bytes, frameRate, hasAudio }
+// Plan a re-encoded copy of a recording. A copy keeps the sound of the
+// recording, so it has the audio bitrate of the recording (a voice if not
+// given).
+// source: { width, height, seconds, bytes, frameRate, hasAudio, audioBitsPerSecond }
 function planExport(preset, source) {
   const size = fitWithin(source.width, source.height, preset.maxWidth, preset.maxHeight);
-  const audioBitsPerSecond = source.hasAudio ? VOICE_AUDIO_BITS_PER_SECOND : 0;
+  const audioBitsPerSecond = source.hasAudio ? source.audioBitsPerSecond || VOICE_AUDIO_BITS_PER_SECOND : 0;
   const bytes = Math.round(
     estimateBytes(preset.videoBitsPerSecond + audioBitsPerSecond, source.seconds) * EXPORT_ESTIMATE_MARGIN
   );
@@ -220,6 +226,7 @@ function cameraBubbleRect(width, height, positionId, sizeId) {
 if (typeof module !== 'undefined') {
   module.exports = {
     SETTINGS_DEFAULTS, RECORDING_PROFILES, EXPORT_PRESETS, EXPORT_ESTIMATE_MARGIN, VOICE_AUDIO_BITS_PER_SECOND,
+    COMPUTER_AUDIO_BITS_PER_SECOND,
     CAMERA_POSITIONS, CAMERA_SIZES, fileTimestamp, sanitizeFolder, buildFilename, extensionForMimeType,
     getRecordingProfile, formatBytes, formatDuration, estimateBytes, bytesPerMinute, fitWithin, planExport,
     cameraBubbleRect
