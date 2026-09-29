@@ -83,6 +83,7 @@
     },
     tabs: {
       getCurrent: async () => ({ id: 42, windowId: 3 }),
+      get: async (id) => ({ id, windowId: 3, status: 'complete' }),
       create: async (options) => {
         calls.tabsCreated.push(options);
         return { id: 99 };
