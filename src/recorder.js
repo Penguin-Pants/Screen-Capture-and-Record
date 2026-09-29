@@ -609,27 +609,34 @@ async function finishRecording() {
   setView('result');
 
   const current = recording;
+  const saveAtOnce = settings.afterRecording === 'save';
+  // Without the camera, "Save at once" does not need the codec check.
+  if (saveAtOnce && !current.camera) saveAsRecorded(current);
+
   // A codec check can stay without an answer. Then the review stops waiting
   // for it, and the recording can be saved as it is.
-  exportSupport = await Promise.race([
+  const support = await Promise.race([
     detectExportSupport(current),
     new Promise((resolve) => setTimeout(resolve, exportCheckLimitMs, { library: true, formats: [], timedOut: true }))
   ]);
   if (recording !== current) return; // A new recording started meanwhile.
+  exportSupport = support;
   renderReview(settings);
 
-  // Without the camera, you can save during the check. Then no second copy.
-  if (settings.afterRecording === 'save' && !current.saved) {
-    if (!exportChoices()[0].enabled) {
-      showMessage('This browser cannot make the video with your camera at full size. Choose a smaller size, then click Save.', 'info');
-      return;
-    }
-    await saveRecording('original');
-    if (recording === current && current.saved) {
-      showMessage(cameraOn()
-        ? 'The recording was saved with your camera. You can also save a smaller copy below.'
-        : 'The recording was saved as it is. You can also save a smaller copy below.', 'info');
-    }
+  if (saveAtOnce && current.camera && !current.saved) await saveAsRecorded(current);
+}
+
+// "Save at once": save the recording as it is (with the camera: at full size).
+async function saveAsRecorded(rec) {
+  if (!exportChoices()[0].enabled) {
+    showMessage('This browser cannot make the video with your camera at full size. Choose a smaller size, then click Save.', 'info');
+    return;
+  }
+  await saveRecording('original');
+  if (recording === rec && rec.saved) {
+    showMessage(cameraOn()
+      ? 'The recording was saved with your camera. You can also save a smaller copy below.'
+      : 'The recording was saved as it is. You can also save a smaller copy below.', 'info');
   }
 }
 

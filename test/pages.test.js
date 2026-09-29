@@ -94,61 +94,69 @@ test('fast toolbar clicks open one recorder; a click while it loads shows that t
   const { page, context, errors } = await openPage('options.html');
   await page.addScriptTag({ path: path.join(SRC, 'background.js') });
   const result = await page.evaluate(async () => {
+    // Fake tabs. A new tab loads, then it has the recorder page after `page` ms,
+    // or it has another page after `other` ms (plans in window.__plans).
+    const tabs = new Map();
     let nextId = 100;
-    // A new tab gets its recorder page 20 ms after it opens, unless it goes to
-    // another page first (window.__leavesAtOnce).
+    window.__plans = [];
     browser.tabs.create = async (options) => {
       window.__calls.tabsCreated.push(options);
-      const id = nextId++;
-      if (!window.__leavesAtOnce) {
-        setTimeout(() => window.__views.push({ __tabId: id, location: { pathname: '/recorder.html' } }), 20);
-      }
-      return { id };
+      const tab = { id: nextId++, windowId: 3, status: 'loading' };
+      tabs.set(tab.id, tab);
+      const plan = window.__plans.shift() || { page: 20 };
+      setTimeout(() => {
+        if (plan.page !== undefined) window.__views.push({ __tabId: tab.id, location: { pathname: '/recorder.html' } });
+        tab.status = 'complete';
+      }, plan.page ?? plan.other);
+      return { id: tab.id };
+    };
+    browser.tabs.get = async (id) => {
+      if (!tabs.has(id)) throw new Error(`Invalid tab ID: ${id}`);
+      return { ...tabs.get(id) };
+    };
+    const close = (id) => {
+      tabs.delete(id);
+      window.__views = window.__views.filter((view) => view.__tabId !== id);
+      browser.tabs.onRemoved.listeners.forEach((listener) => listener(id));
     };
     const state = () => ({
       created: window.__calls.tabsCreated.length,
       shown: window.__calls.tabsUpdated.map((update) => update.id)
     });
+    const click = browser.browserAction.onClicked.listeners[0];
 
     // Fast clicks: one tab (100). The other clicks wait for its page, then show the tab.
-    const click = browser.browserAction.onClicked.listeners[0];
     click();
     click();
     await openRecorder(); // a third click, handled after the first two
     const fast = state();
-    await new Promise((resolve) => setTimeout(resolve, 50)); // tab 100 has its page now
 
-    // 5 s later, tab 100 still loads the recorder page: a click shows it.
-    const now = Date.now;
-    Date.now = () => now() + 5000;
+    // A slow recorder page (1.5 s): a fast second click still waits for it (tab 101).
+    close(100);
+    window.__plans = [{ page: 1500 }];
+    click();
     await openRecorder();
-    const stillLoading = state();
+    const slow = state();
 
-    // Tab 100 left the recorder page before it loaded: a click opens a new recorder (101).
-    window.__views.splice(window.__views.findIndex((view) => view.__tabId === 100), 1);
-    window.__leavesAtOnce = true;
+    // A new tab (102) loads another page: a click does not show it, and opens a new recorder (103).
+    close(101);
+    window.__plans = [{ other: 200 }];
+    click();
     await openRecorder();
-    const left = state();
+    const other = state();
 
-    // Tab 101 went to another page before its recorder page existed. A click in
-    // its first second does not show it: it opens a new recorder (102).
-    window.__leavesAtOnce = false;
-    await openRecorder();
-    const leftAtOnce = state();
-
-    // The recorder page in tab 102 is ready: the page itself comes to the front.
+    // The recorder page in tab 103 is ready: the page itself comes to the front.
     await new Promise((resolve) => setTimeout(resolve, 50));
     let focused = 0;
-    const ready = window.__views.find((view) => view.__tabId === 102);
+    const ready = window.__views.find((view) => view.__tabId === 103);
     if (ready) ready.focusRecorder = async () => { focused++; };
     await openRecorder();
-    return { fast, stillLoading, left, leftAtOnce, ready: state(), focused };
+    return { fast, slow, other, ready: state(), focused };
   });
   assert.deepEqual(result.fast, { created: 1, shown: [100, 100] }, 'one recorder tab');
-  assert.deepEqual(result.stillLoading, { created: 1, shown: [100, 100, 100] });
-  assert.deepEqual(result.left, { created: 2, shown: [100, 100, 100] }, 'a tab that left the page is not shown');
-  assert.deepEqual(result.leftAtOnce, { created: 3, shown: [100, 100, 100] }, 'not even in its first second');
-  assert.deepEqual(result.ready, result.leftAtOnce);
+  assert.deepEqual(result.slow, { created: 2, shown: [100, 100, 101] }, 'no second tab for a slow page');
+  assert.deepEqual(result.other, { created: 4, shown: [100, 100, 101] }, 'a tab with another page is not shown');
+  assert.deepEqual(result.ready, result.other);
   assert.equal(result.focused, 1);
   assert.deepEqual(errors, []);
   await context.close();
