@@ -1,0 +1,64 @@
+{
+  "manifest_version": 2,
+  "name": "ScreenCapture Pro",
+  "version": "1.0.1",
+  "description": "Professional screenshot and screen recording tool with advanced editing. Capture, annotate, and record effortlessly.",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "permissions": [
+    "activeTab",
+    "storage",
+    "tabs",
+    "downloads",
+    "<all_urls>",
+    "notifications"
+  ],
+  "background": {
+    "scripts": [
+      "background.js"
+    ],
+    "persistent": true
+  },
+  "browser_action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    },
+    "default_title": "ScreenCapture Pro"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "commands": {
+    "capture-visible": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+S"
+      },
+      "description": "Capture visible area"
+    }
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "screencapture-pro@extension.local",
+      "strict_min_version": "109.0"
+    }
+  }
+}

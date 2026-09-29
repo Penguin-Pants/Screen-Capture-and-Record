@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Screen Recorder - ScreenCapture Pro</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+
+    .container {
+      background: white;
+      border-radius: 20px;
+      padding: 40px;
+      max-width: 500px;
+      width: 100%;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+      text-align: center;
+    }
+
+    h1 {
+      color: #333;
+      margin-bottom: 10px;
+      font-size: 32px;
+    }
+
+    p {
+      color: #666;
+      margin-bottom: 30px;
+      font-size: 16px;
+    }
+
+    .btn {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      border: none;
+      border-radius: 12px;
+      padding: 18px 40px;
+      font-size: 18px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 0.3s ease;
+      width: 100%;
+      margin-bottom: 15px;
+    }
+
+    .btn:hover:not(:disabled) {
+      transform: translateY(-2px);
+      box-shadow: 0 10px 30px rgba(102, 126, 234, 0.4);
+    }
+
+    .btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .btn-stop {
+      background: #ff4444;
+    }
+
+    .btn-stop:hover {
+      box-shadow: 0 10px 30px rgba(255, 68, 68, 0.4);
+    }
+
+    .recording-status {
+      display: none;
+      background: #f8f9fa;
+      padding: 20px;
+      border-radius: 12px;
+      margin: 20px 0;
+    }
+
+    .recording-status.active {
+      display: block;
+    }
+
+    .rec-indicator {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      font-size: 18px;
+      font-weight: 600;
+      color: #ff4444;
+      margin-bottom: 15px;
+    }
+
+    .rec-dot {
+      width: 12px;
+      height: 12px;
+      background: #ff4444;
+      border-radius: 50%;
+      animation: blink 1s infinite;
+    }
+
+    @keyframes blink {
+      0%, 50%, 100% { opacity: 1; }
+      25%, 75% { opacity: 0.3; }
+    }
+
+    .timer {
+      font-size: 32px;
+      font-weight: 700;
+      color: #333;
+      font-family: 'Courier New', monospace;
+    }
+
+    .options {
+      background: #f8f9fa;
+      padding: 20px;
+      border-radius: 12px;
+      margin: 20px 0;
+      text-align: left;
+    }
+
+    .option-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 15px;
+    }
+
+    .option-item:last-child {
+      margin-bottom: 0;
+    }
+
+    .option-item input[type="checkbox"] {
+      width: 20px;
+      height: 20px;
+      cursor: pointer;
+    }
+
+    .option-item label {
+      cursor: pointer;
+      color: #333;
+      font-size: 14px;
+    }
+
+    .info {
+      background: #e7f3ff;
+      border-left: 4px solid #667eea;
+      padding: 15px;
+      border-radius: 8px;
+      text-align: left;
+      font-size: 14px;
+      color: #333;
+      margin-top: 20px;
+    }
+
+    .info strong {
+      color: #667eea;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🎥 Screen Recorder</h1>
+    <p id="subtitle">Record your screen with audio</p>
+
+    <div class="options" id="optionsPanel">
+      <div class="option-item">
+        <input type="checkbox" id="audioCheck" checked>
+        <label for="audioCheck">Include audio</label>
+      </div>
+      <div class="option-item">
+        <input type="checkbox" id="micCheck">
+        <label for="micCheck">Include microphone</label>
+      </div>
+    </div>
+
+    <button class="btn" id="startBtn">Start Recording</button>
+
+    <div class="recording-status" id="recordingStatus">
+      <div class="rec-indicator">
+        <div class="rec-dot"></div>
+        <span>Recording...</span>
+      </div>
+      <div class="timer" id="timer">00:00</div>
+    </div>
+
+    <button class="btn btn-stop" id="stopBtn" style="display: none;">Stop Recording</button>
+
+    <div class="info">
+      <strong>How it works:</strong><br>
+      1. Click "Start Recording"<br>
+      2. Select what to share (entire screen, window, or tab)<br>
+      3. Click "Stop Recording" when done<br>
+      4. Your video will download automatically
+    </div>
+  </div>
+
+  <script src="recorder.js"></script>
+</body>
+</html>
