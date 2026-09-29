@@ -1,0 +1,15 @@
+{
+  "name": "screen-capture-and-record",
+  "version": "1.0.1",
+  "private": true,
+  "description": "Firefox extension for screenshots, screen recording and image annotation. Based on ScreenCapture Pro 1.0.1.",
+  "license": "AGPL-3.0-only",
+  "scripts": {
+    "lint": "web-ext lint --source-dir src",
+    "start": "web-ext run --source-dir src",
+    "build": "web-ext build --source-dir src --artifacts-dir dist --overwrite-dest"
+  },
+  "devDependencies": {
+    "web-ext": "^8.10.0"
+  }
+}
