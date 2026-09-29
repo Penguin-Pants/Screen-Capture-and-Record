@@ -11,6 +11,7 @@
     "build": "web-ext build --source-dir src --artifacts-dir dist --overwrite-dest"
   },
   "devDependencies": {
+    "playwright-core": "1.56",
     "web-ext": "^8.10.0"
   }
 }

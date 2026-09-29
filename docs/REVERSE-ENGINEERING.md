@@ -7,6 +7,7 @@
 - There is no build step. Firefox loads `src/` directly.
 - Captures are processed locally. The only external URL is a PayPal donation link.
 - Several features have bugs or are dead code. See [Known defects](#known-defects).
+- Version 2.0.0 of this repository fixes most of them. See [Status in 2.0.0](#status-in-200).
 
 ## Source package
 
@@ -116,7 +117,7 @@ Messages go from sender to `background.js` unless noted.
 
 ## Known defects
 
-Line numbers refer to files in `src/`. Items marked **(verify)** come from code reading. Test them in Firefox before you fix them.
+Line numbers refer to the original 1.0.1 files (first commit). Items marked **(verify)** come from code reading. Test them in Firefox before you fix them.
 
 ### Capture
 
@@ -164,3 +165,34 @@ Line numbers refer to files in `src/`. Items marked **(verify)** come from code 
 - Notice `MISSING_DATA_COLLECTION_PERMISSIONS` (manifest)
 
 The signed XPI also gave `ALREADY_SIGNED`. This goes away because `src/` has no `META-INF/`.
+
+## Status in 2.0.0
+
+| # | Defect | Status |
+| --- | --- | --- |
+| 1-4 | Full-page HiDPI, overlap, speed, repeated headers | Fixed. `tabs.captureTab()` with `rect` renders the document directly, in tiles, at device pixel ratio. |
+| 5 | `data:` URL to `downloads.download` | Fixed. All saves use blob URLs. |
+| 6 | `Ctrl+Shift+S` conflict | Fixed. New defaults `Alt+Shift+A/S/F`. |
+| 7 | Download from inside the web page | Fixed. The background page saves files. |
+| 8 | Early notification, wrong history name | Fixed. Notification after save. History removed (nothing read it). |
+| 9 | Leaked `Escape` listener | Fixed. `overlay.js` removes its listener. |
+| 10 | Area selection only in viewport | Open. |
+| 11 | Microphone stays on | Fixed. All tracks stop. |
+| 12 | System audio in Firefox | Confirmed. Firefox gives no audio track. Option is off by default and the page explains it. |
+| 13 | No pause, countdown, format choice | Fixed. |
+| 14 | `alert` after save | Fixed. Inline result panel. |
+| 15 | Layer move erases annotations | Fixed. |
+| 16 | Undo desyncs layers | Fixed. |
+| 17 | Blur is pixelate | Fixed. Gaussian blur. |
+| 18 | Custom rotation clips | Fixed. |
+| 19 | No capture-to-editor path | Fixed. Editor is the default after-capture action. |
+| 20 | History memory | Improved. Canvas copies with a 512 MB limit. |
+| 21 | `prompt`, `confirm`, `alert` | Open (some remain in the editor). |
+| 22 | False feature claims | Fixed. New settings page. |
+| 23 | Donation links | Removed. |
+| 24 | Heavy logging | Fixed in rewritten files. |
+| 25 | Lint warnings | Fixed. 0 warnings. |
+| 26 | Manifest V2 | Open (still MV2, supported by Firefox). |
+
+Also fixed in 2.0.0: highlight opacity build-up, duplicate text after a cancelled text dialog, double history step on crop, unfinished shape preview left on the canvas, pointer offset from the canvas border.
+
