@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Settings - Screen Capture and Record</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font: 14px/1.5 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      padding: 32px 16px;
+      color: #222;
+    }
+
+    .container { max-width: 720px; margin: 0 auto; }
+
+    .header { display: flex; align-items: center; gap: 14px; color: #fff; margin-bottom: 20px; }
+    .header img { width: 48px; height: 48px; }
+    .header h1 { font-size: 24px; }
+    .header p { opacity: 0.9; }
+
+    .card { background: #fff; border-radius: 14px; padding: 22px 24px; margin-bottom: 16px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.15); }
+    .card h2 { font-size: 17px; margin-bottom: 14px; color: #4b3f9e; }
+
+    .row { display: grid; grid-template-columns: 200px 1fr; gap: 12px; align-items: center; padding: 8px 0; }
+    .row + .row { border-top: 1px solid #eee; }
+    .row label { font-weight: 600; }
+    .row small { display: block; color: #666; font-weight: 400; }
+    .row select, .row input[type="text"] {
+      width: 100%; padding: 7px 9px; border: 1px solid #ccc; border-radius: 8px; font: inherit;
+    }
+    .inline { display: flex; align-items: center; gap: 10px; }
+
+    .shortcuts { width: 100%; border-collapse: collapse; }
+    .shortcuts td { padding: 6px 0; border-bottom: 1px solid #eee; }
+    .shortcuts td:last-child { text-align: right; }
+    kbd { background: #f1f1f5; border: 1px solid #ccc; border-radius: 4px; padding: 1px 6px; font: 12px monospace; }
+
+    .hint { color: #555; font-size: 13px; margin-top: 10px; }
+
+    .saved { position: fixed; bottom: 20px; right: 20px; background: #2e7d32; color: #fff;
+             padding: 8px 14px; border-radius: 8px; opacity: 0; transition: opacity 0.2s; }
+    .saved.show { opacity: 1; }
+
+    @media (max-width: 560px) { .row { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <img src="icons/icon96.png" alt="">
+      <div>
+        <h1>Screen Capture and Record</h1>
+        <p>Settings</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Recording</h2>
+      <div class="row">
+        <label for="profile">Default quality<small>Used for new recordings. You can change it on the recorder page.</small></label>
+        <select id="profile"></select>
+      </div>
+      <div class="row">
+        <label for="afterRecording">After recording</label>
+        <select id="afterRecording">
+          <option value="review">Show the video and size options first</option>
+          <option value="save">Save at once</option>
+        </select>
+      </div>
+      <p class="hint">File size depends on quality and length. The recorder shows the size while you record. After you stop, you can also save a smaller copy.</p>
+    </div>
+
+    <div class="card">
+      <h2>Camera</h2>
+      <div class="row">
+        <label for="cameraPosition">Camera position<small>Where your camera shows in the video. You can change it after each recording.</small></label>
+        <select id="cameraPosition"></select>
+      </div>
+      <div class="row">
+        <label for="cameraSize">Camera size</label>
+        <select id="cameraSize"></select>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Saved files</h2>
+      <div class="row">
+        <label for="downloadFolder">Subfolder<small>Inside your Downloads folder. Empty means no subfolder.</small></label>
+        <input type="text" id="downloadFolder" placeholder="Recordings" spellcheck="false">
+      </div>
+      <div class="row">
+        <label for="saveAs">Ask where to save</label>
+        <div class="inline"><input type="checkbox" id="saveAs"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Keyboard shortcut</h2>
+      <table class="shortcuts" id="shortcuts"></table>
+      <p class="hint">To change a shortcut: open <strong>about:addons</strong>, click the gear icon, then <strong>Manage Extension Shortcuts</strong>.</p>
+    </div>
+
+    <div class="card">
+      <h2>Privacy</h2>
+      <p>Recordings stay on your device. The extension sends no data to any server and cannot read the websites you visit.</p>
+    </div>
+  </div>
+
+  <div class="saved" id="saved">Saved</div>
+
+  <script src="common.js"></script>
+  <script src="options.js"></script>
+</body>
+</html>
