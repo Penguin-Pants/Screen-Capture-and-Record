@@ -112,26 +112,40 @@ function extensionForMimeType(mimeType) {
   return mimeType.startsWith('video/mp4') ? 'mp4' : 'webm';
 }
 
-// Save a Blob with the downloads API. Returns the download ID, or null when
-// the person cancels the "Save as" dialog. The object URL stays valid until
-// the download ends, then it is released.
+// Save a Blob with the downloads API. Resolves with the download ID when the
+// file is complete, or with null when the person cancels (in the "Save as"
+// dialog or in the downloads panel). Rejects when the download fails, for
+// example when the disk is full. The object URL is released at the end.
 async function downloadBlob(blob, filename, saveAs = false) {
   const url = URL.createObjectURL(blob);
-  let downloadId;
+  // Listen before the download starts: a small file can be complete before
+  // download() gives its ID.
+  const changes = [];
+  let onChange = (delta) => changes.push(delta);
+  const listener = (delta) => onChange(delta);
+  browser.downloads.onChanged.addListener(listener);
   try {
-    downloadId = await browser.downloads.download({ url, filename, saveAs, conflictAction: 'uniquify' });
-  } catch (error) {
+    let downloadId;
+    try {
+      downloadId = await browser.downloads.download({ url, filename, saveAs, conflictAction: 'uniquify' });
+    } catch (error) {
+      if (/cancel/i.test(error.message)) return null;
+      throw error;
+    }
+    const end = await new Promise((resolve) => {
+      onChange = (delta) => {
+        if (delta.id === downloadId && delta.state && delta.state.current !== 'in_progress') resolve(delta);
+      };
+      changes.forEach(onChange);
+    });
+    if (end.state.current === 'complete') return downloadId;
+    const reason = end.error ? end.error.current : 'unknown error';
+    if (reason === 'USER_CANCELED') return null;
+    throw new Error(`Firefox could not write the file (${reason}).`);
+  } finally {
+    browser.downloads.onChanged.removeListener(listener);
     URL.revokeObjectURL(url);
-    if (/cancel/i.test(error.message)) return null;
-    throw error;
   }
-  const release = (delta) => {
-    if (delta.id !== downloadId || !delta.state || delta.state.current === 'in_progress') return;
-    browser.downloads.onChanged.removeListener(release);
-    URL.revokeObjectURL(url);
-  };
-  browser.downloads.onChanged.addListener(release);
-  return downloadId;
 }
 
 function getRecordingProfile(id) {

@@ -84,6 +84,7 @@ let previewCameraUrl = null;
 let lastDownloadId = null;
 let exportSupport = null;   // null while checking, then { library, formats }
 let conversion = null;      // The running Mediabunny conversion, for Cancel
+let saving = false;         // A save (export, then download) is running
 let cancelRequested = false;
 let mediabunnyPromise = null;
 
@@ -804,6 +805,9 @@ function renderReview(settings) {
     return label;
   }));
 
+  // Save waits for the check: until then the choices are not final, and
+  // "As recorded" would save a camera recording without the camera.
+  ui.save.disabled = saving || exportSupport === null;
   if (exportSupport === null) {
     ui.exportNote.textContent = 'Checking which formats this browser can make...';
   } else if (!exportSupport.library) {
@@ -854,6 +858,7 @@ function renderFormats(settings) {
 }
 
 function setBusy(busy) {
+  saving = busy;
   ui.save.disabled = busy;
   ui.again.disabled = busy;
   ui.format.disabled = busy || ui.format.value === 'original';
@@ -1000,7 +1005,7 @@ async function remuxRecording() {
 }
 
 async function saveRecording(choiceId = selectedChoiceId()) {
-  if (!recording || conversion) return;
+  if (!recording || saving || exportSupport === null) return;
   const rec = recording;
   const choice = exportChoices().find((item) => item.id === choiceId);
   if (!choice || !choice.enabled) return;
