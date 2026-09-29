@@ -3,300 +3,117 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ScreenCapture Pro - About</title>
+  <title>Settings - Screen Capture and Record</title>
   <style>
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
 
     body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      font: 14px/1.5 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
       background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
       min-height: 100vh;
-      padding: 40px 20px;
+      padding: 32px 16px;
+      color: #222;
     }
 
-    .container {
-      max-width: 800px;
-      margin: 0 auto;
-    }
+    .container { max-width: 720px; margin: 0 auto; }
 
-    .card {
-      background: white;
-      border-radius: 20px;
-      padding: 40px;
-      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-      margin-bottom: 30px;
-    }
+    .header { display: flex; align-items: center; gap: 14px; color: #fff; margin-bottom: 20px; }
+    .header img { width: 48px; height: 48px; }
+    .header h1 { font-size: 24px; }
+    .header p { opacity: 0.9; }
 
-    .header {
-      text-align: center;
-      margin-bottom: 40px;
-    }
+    .card { background: #fff; border-radius: 14px; padding: 22px 24px; margin-bottom: 16px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.15); }
+    .card h2 { font-size: 17px; margin-bottom: 14px; color: #4b3f9e; }
 
-    .header h1 {
-      font-size: 36px;
-      color: #333;
-      margin-bottom: 10px;
+    .row { display: grid; grid-template-columns: 200px 1fr; gap: 12px; align-items: center; padding: 8px 0; }
+    .row + .row { border-top: 1px solid #eee; }
+    .row label { font-weight: 600; }
+    .row small { display: block; color: #666; font-weight: 400; }
+    .row select, .row input[type="text"] {
+      width: 100%; padding: 7px 9px; border: 1px solid #ccc; border-radius: 8px; font: inherit;
     }
+    .row input[type="range"] { width: 100%; }
+    .inline { display: flex; align-items: center; gap: 10px; }
 
-    .header p {
-      color: #666;
-      font-size: 16px;
-    }
+    .shortcuts { width: 100%; border-collapse: collapse; }
+    .shortcuts td { padding: 6px 0; border-bottom: 1px solid #eee; }
+    .shortcuts td:last-child { text-align: right; }
+    kbd { background: #f1f1f5; border: 1px solid #ccc; border-radius: 4px; padding: 1px 6px; font: 12px monospace; }
 
-    .support-section {
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      color: white;
-      padding: 30px;
-      border-radius: 15px;
-      text-align: center;
-      margin-bottom: 30px;
-    }
+    .hint { color: #555; font-size: 13px; margin-top: 10px; }
 
-    .support-section h2 {
-      font-size: 28px;
-      margin-bottom: 15px;
-    }
+    .saved { position: fixed; bottom: 20px; right: 20px; background: #2e7d32; color: #fff;
+             padding: 8px 14px; border-radius: 8px; opacity: 0; transition: opacity 0.2s; }
+    .saved.show { opacity: 1; }
 
-    .support-section p {
-      opacity: 0.95;
-      font-size: 16px;
-      line-height: 1.6;
-      margin-bottom: 25px;
-    }
-
-    .btn {
-      background: white;
-      color: #667eea;
-      border: none;
-      border-radius: 10px;
-      padding: 15px 35px;
-      font-size: 16px;
-      font-weight: 700;
-      cursor: pointer;
-      transition: all 0.3s ease;
-      display: inline-flex;
-      align-items: center;
-      gap: 10px;
-    }
-
-    .btn:hover {
-      transform: translateY(-2px);
-      box-shadow: 0 10px 25px rgba(255, 255, 255, 0.3);
-    }
-
-    .features-section {
-      margin-bottom: 40px;
-    }
-
-    .features-section h2 {
-      color: #333;
-      font-size: 24px;
-      margin-bottom: 20px;
-    }
-
-    .features-list {
-      list-style: none;
-    }
-
-    .features-list li {
-      padding: 15px 0;
-      border-bottom: 1px solid #e0e0e0;
-      display: flex;
-      align-items: center;
-      gap: 15px;
-      color: #333;
-    }
-
-    .features-list li:last-child {
-      border-bottom: none;
-    }
-
-    .feature-icon {
-      font-size: 24px;
-      min-width: 30px;
-    }
-
-    .about-section {
-      background: #f8f9fa;
-      padding: 25px;
-      border-radius: 12px;
-      margin-bottom: 30px;
-    }
-
-    .about-section h3 {
-      color: #333;
-      font-size: 20px;
-      margin-bottom: 15px;
-    }
-
-    .about-section p {
-      color: #666;
-      line-height: 1.8;
-      margin-bottom: 15px;
-    }
-
-    .tech-stack {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-      margin-top: 15px;
-    }
-
-    .tech-badge {
-      background: #667eea;
-      color: white;
-      padding: 6px 12px;
-      border-radius: 6px;
-      font-size: 12px;
-      font-weight: 600;
-    }
-
-    .contact-section {
-      text-align: center;
-      padding: 20px;
-    }
-
-    .contact-section h3 {
-      color: #333;
-      margin-bottom: 15px;
-    }
-
-    .contact-links {
-      display: flex;
-      justify-content: center;
-      gap: 20px;
-      flex-wrap: wrap;
-    }
-
-    .contact-links a {
-      color: #667eea;
-      text-decoration: none;
-      font-weight: 600;
-      transition: color 0.3s;
-    }
-
-    .contact-links a:hover {
-      color: #764ba2;
-    }
-
-    .footer {
-      text-align: center;
-      color: white;
-      margin-top: 40px;
-      opacity: 0.8;
-      font-size: 14px;
-    }
+    @media (max-width: 560px) { .row { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
   <div class="container">
-    <div class="card">
-      <div class="header">
-        <h1>📸 ScreenCapture Pro</h1>
-        <p>Professional Screenshot & Screen Recording Tool</p>
-      </div>
-
-      <div class="support-section">
-        <h2>💙 Support This Project</h2>
-        <p>
-          ScreenCapture Pro is completely free and open-source. If you find it useful 
-          and would like to support its continued development and improvement, 
-          your financial contribution would be greatly appreciated.
-        </p>
-        <p style="font-size: 14px; opacity: 0.9;">
-          Your support helps maintain the project, add new features, and keep it ad-free for everyone.
-        </p>
-        <button class="btn" id="supportBtn">
-          <span>💳</span>
-          <span>Support via PayPal</span>
-        </button>
-      </div>
-
-      <div class="features-section">
-        <h2>✨ Features</h2>
-        <ul class="features-list">
-          <li>
-            <span class="feature-icon">📷</span>
-            <div>
-              <strong>Visible Area Capture</strong><br>
-              <small>Quick screenshot of the visible portion of any page</small>
-            </div>
-          </li>
-          <li>
-            <span class="feature-icon">📄</span>
-            <div>
-              <strong>Full Page Capture</strong><br>
-              <small>Capture entire scrollable pages automatically</small>
-            </div>
-          </li>
-          <li>
-            <span class="feature-icon">✂️</span>
-            <div>
-              <strong>Area Selection</strong><br>
-              <small>Select and capture any specific region</small>
-            </div>
-          </li>
-          <li>
-            <span class="feature-icon">🎥</span>
-            <div>
-              <strong>Screen Recording</strong><br>
-              <small>Record screen with system audio and microphone support</small>
-            </div>
-          </li>
-          <li>
-            <span class="feature-icon">✏️</span>
-            <div>
-              <strong>Advanced Editor</strong><br>
-              <small>Draw, blur, pixelate, add text, arrows, shapes and more</small>
-            </div>
-          </li>
-          <li>
-            <span class="feature-icon">📐</span>
-            <div>
-              <strong>Image Tools</strong><br>
-              <small>Crop, resize, rotate, flip and transform images</small>
-            </div>
-          </li>
-          <li>
-            <span class="feature-icon">💾</span>
-            <div>
-              <strong>Multiple Formats</strong><br>
-              <small>Export as PNG or JPG with quality control</small>
-            </div>
-          </li>
-        </ul>
-      </div>
-
-      <div class="about-section">
-        <h3>📋 About This Project</h3>
-        <p>
-          ScreenCapture Pro is a powerful, feature-rich screenshot and screen recording 
-          extension built with modern web technologies. It's designed to be intuitive, 
-          fast, and completely free for everyone.
-        </p>
-        <p>
-          All captures are processed locally on your device - no data is ever sent to 
-          external servers. Your privacy and security are our top priorities.
-        </p>
-        <div class="tech-stack">
-          <span class="tech-badge">JavaScript</span>
-          <span class="tech-badge">Chrome Extensions API</span>
-          <span class="tech-badge">Canvas API</span>
-          <span class="tech-badge">MediaRecorder API</span>
-          <span class="tech-badge">WebRTC</span>
-        </div>
+    <div class="header">
+      <img src="icons/icon96.png" alt="">
+      <div>
+        <h1>Screen Capture and Record</h1>
+        <p>Settings</p>
       </div>
     </div>
 
-    <div class="footer">
-      <p>ScreenCapture Pro v1.0.1 | Made with 💙 | Open Source</p>
+    <div class="card">
+      <h2>After a capture</h2>
+      <div class="row">
+        <label for="afterCapture">Action</label>
+        <select id="afterCapture">
+          <option value="editor">Open in the editor</option>
+          <option value="download">Save to the Downloads folder</option>
+          <option value="clipboard">Copy to the clipboard</option>
+        </select>
+      </div>
+      <div class="row">
+        <label for="loadLazyContent">Full page: load lazy content<small>Scrolls the page once before capture so late images appear.</small></label>
+        <div class="inline"><input type="checkbox" id="loadLazyContent"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Saved files</h2>
+      <div class="row">
+        <label for="imageFormat">Image format</label>
+        <select id="imageFormat">
+          <option value="png">PNG (lossless)</option>
+          <option value="jpeg">JPEG (smaller files)</option>
+        </select>
+      </div>
+      <div class="row">
+        <label for="jpegQuality">JPEG quality</label>
+        <div class="inline"><input type="range" id="jpegQuality" min="10" max="100" step="1"><span id="jpegQualityValue"></span></div>
+      </div>
+      <div class="row">
+        <label for="downloadFolder">Subfolder<small>Inside your Downloads folder. Empty means no subfolder.</small></label>
+        <input type="text" id="downloadFolder" placeholder="Screenshots" spellcheck="false">
+      </div>
+      <div class="row">
+        <label for="saveAs">Ask where to save</label>
+        <div class="inline"><input type="checkbox" id="saveAs"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Keyboard shortcuts</h2>
+      <table class="shortcuts" id="shortcuts"></table>
+      <p class="hint">To change a shortcut: open <strong>about:addons</strong>, click the gear icon, then <strong>Manage Extension Shortcuts</strong>.</p>
+    </div>
+
+    <div class="card">
+      <h2>Privacy</h2>
+      <p>All captures, edits and recordings stay on your device. The extension sends no data to any server.</p>
     </div>
   </div>
 
+  <div class="saved" id="saved">Saved</div>
+
+  <script src="common.js"></script>
   <script src="options.js"></script>
 </body>
 </html>

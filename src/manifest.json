@@ -1,23 +1,27 @@
 {
   "manifest_version": 2,
-  "name": "ScreenCapture Pro",
-  "version": "1.0.1",
-  "description": "Professional screenshot and screen recording tool with advanced editing. Capture, annotate, and record effortlessly.",
+  "name": "Screen Capture and Record",
+  "version": "2.0.0",
+  "description": "Capture the visible area, a selected area or the full page, annotate the image and record your screen. All processing stays on your device.",
   "icons": {
     "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
     "48": "icons/icon48.png",
+    "96": "icons/icon96.png",
     "128": "icons/icon128.png"
   },
   "permissions": [
-    "activeTab",
-    "storage",
+    "<all_urls>",
     "tabs",
     "downloads",
-    "<all_urls>",
-    "notifications"
+    "storage",
+    "notifications",
+    "clipboardWrite"
   ],
   "background": {
     "scripts": [
+      "common.js",
+      "capture.js",
       "background.js"
     ],
     "persistent": true
@@ -26,39 +30,42 @@
     "default_popup": "popup.html",
     "default_icon": {
       "16": "icons/icon16.png",
-      "48": "icons/icon48.png",
-      "128": "icons/icon128.png"
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png"
     },
-    "default_title": "ScreenCapture Pro"
+    "default_title": "Screen Capture and Record"
   },
-  "content_scripts": [
-    {
-      "matches": [
-        "<all_urls>"
-      ],
-      "js": [
-        "content.js"
-      ],
-      "run_at": "document_idle",
-      "all_frames": false
-    }
-  ],
   "options_ui": {
     "page": "options.html",
     "open_in_tab": true
   },
   "commands": {
+    "capture-area": {
+      "suggested_key": {
+        "default": "Alt+Shift+A"
+      },
+      "description": "Capture a selected area"
+    },
     "capture-visible": {
       "suggested_key": {
-        "default": "Ctrl+Shift+S"
+        "default": "Alt+Shift+S"
       },
-      "description": "Capture visible area"
+      "description": "Capture the visible area"
+    },
+    "capture-fullpage": {
+      "suggested_key": {
+        "default": "Alt+Shift+F"
+      },
+      "description": "Capture the full page"
     }
   },
   "browser_specific_settings": {
     "gecko": {
-      "id": "screencapture-pro@extension.local",
-      "strict_min_version": "109.0"
+      "id": "screen-capture-and-record@penguin-pants",
+      "strict_min_version": "115.0",
+      "data_collection_permissions": {
+        "required": ["none"]
+      }
     }
   }
 }

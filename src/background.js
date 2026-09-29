@@ -1,424 +1,202 @@
-// Firefox compatible background script
-// Use browser namespace for Firefox compatibility
-const browserAPI = typeof browser !== 'undefined' ? browser : chrome;
+// Background page: message router, keyboard commands, capture delivery
+// and the recording badge. Loads after common.js and capture.js.
+'use strict';
 
-// Handle messages
-browserAPI.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  console.log('Background received message:', request.action, 'from tab:', sender.tab?.id);
-  
-  if (request.action === 'captureViewportForCrop') {
-    console.log('Starting captureAndCropArea...');
-    captureAndCropArea(request.selection, sender.tab.id).then(() => {
-      sendResponse({ success: true, message: 'Capture started' });
-    }).catch(error => {
-      console.error('Capture error:', error);
-      sendResponse({ success: false, error: error.message });
-    });
-    return true; // Keep channel open for async response
-  } else if (request.action === 'openEditor') {
-    openEditor();
-    sendResponse({ success: true });
-  } else if (request.action === 'captureFullPage') {
-    captureFullPage().then(() => {
-      sendResponse({ success: true });
-    });
-    return true;
-  } else if (request.action === 'cropAndSave') {
-    cropAndSaveImage(request.data);
-    sendResponse({ success: true });
-  } else if (request.action === 'recordingStopped') {
-    showNotification('Recording Saved!', 'Your screen recording has been saved');
-    sendResponse({ success: true });
-  } else if (request.action === 'captureVisibleTab') {
-    // Direct capture request from content script
-    browserAPI.tabs.captureVisibleTab(null, { format: 'png' }).then(dataUrl => {
-      sendResponse({ dataUrl: dataUrl });
-    }).catch(error => {
-      sendResponse({ error: error.message });
-    });
-    return true;
-  }
-  
-  return true;
-});
+const CAPTURE_TTL_MS = 10 * 60 * 1000;
+const EDITOR_URL = browser.runtime.getURL('editor.html');
+const RECORDER_URL = browser.runtime.getURL('recorder.html');
 
-// Safe notification function
-function showNotification(title, message) {
-  try {
-    if (browserAPI.notifications) {
-      browserAPI.notifications.create({
-        type: 'basic',
-        iconUrl: browserAPI.runtime.getURL('icons/icon128.png'),
-        title: title,
-        message: message
-      });
-    }
-  } catch (error) {
-    console.log(title + ': ' + message);
-  }
-}
+// Captures waiting for (or shown in) an editor tab: id -> { blob, name, created, editorTabId }
+const captureStore = new Map();
+// Notification ID -> download ID, so a click on the notification shows the file.
+const notificationDownloads = new Map();
+let recorderTabId = null;
 
-// Capture and crop area
-async function captureAndCropArea(selection, tabId) {
-  console.log('=== CAPTURE AND CROP AREA STARTED ===');
-  console.log('Selection:', selection);
-  console.log('Tab ID:', tabId);
-  
-  try {
-    // Small delay to ensure UI is hidden
-    console.log('Waiting 200ms for UI to hide...');
-    await new Promise(resolve => setTimeout(resolve, 200));
-    
-    console.log('Capturing visible tab...');
-    const dataUrl = await browserAPI.tabs.captureVisibleTab(null, { format: 'png' });
-    console.log('Captured! Data URL length:', dataUrl.length);
-    
-    if (!dataUrl || dataUrl.length === 0) {
-      throw new Error('Capture returned empty data');
-    }
-    
-    // Process in content script
-    console.log('Injecting crop script into tab:', tabId);
-    
-    // Firefox uses different API for script execution
-    const result = await browserAPI.tabs.executeScript(tabId, {
-      code: `
-        (function(dataUrl, sel) {
-          console.log('=== CROP SCRIPT EXECUTING ===');
-          console.log('Selection received:', sel);
-          console.log('DataURL length:', dataUrl.length);
-          
-          try {
-            const img = document.createElement('img');
-            
-            img.onload = () => {
-              console.log('Image loaded successfully');
-              console.log('Image dimensions:', img.width, 'x', img.height);
-              
-              const canvas = document.createElement('canvas');
-              const dpr = window.devicePixelRatio || 1;
-              console.log('Device pixel ratio:', dpr);
-              
-              canvas.width = sel.width * dpr;
-              canvas.height = sel.height * dpr;
-              console.log('Canvas size:', canvas.width, 'x', canvas.height);
-              
-              const ctx = canvas.getContext('2d');
-              
-              ctx.drawImage(
-                img,
-                sel.left * dpr, 
-                sel.top * dpr, 
-                sel.width * dpr, 
-                sel.height * dpr,
-                0, 
-                0, 
-                canvas.width, 
-                canvas.height
-              );
-              
-              console.log('Image drawn to canvas, creating blob...');
-              
-              canvas.toBlob((blob) => {
-                console.log('Blob created, size:', blob.size);
-                
-                const url = URL.createObjectURL(blob);
-                const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
-                const filename = 'area-capture-' + timestamp + '.png';
-                
-                console.log('Creating download link:', filename);
-                
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = filename;
-                document.body.appendChild(a);
-                a.click();
-                document.body.removeChild(a);
-                
-                setTimeout(() => {
-                  URL.revokeObjectURL(url);
-                  console.log('=== DOWNLOAD COMPLETE ===');
-                }, 100);
-              }, 'image/png');
-            };
-            
-            img.onerror = (err) => {
-              console.error('Image load error:', err);
-              alert('Failed to load captured image');
-            };
-            
-            console.log('Setting image src...');
-            img.src = dataUrl;
-            
-          } catch (error) {
-            console.error('Error in crop script:', error);
-            alert('Crop error: ' + error.message);
-          }
-        })(${JSON.stringify(dataUrl)}, ${JSON.stringify(selection)});
-      `
-    });
-    
-    console.log('Script injection result:', result);
-    
-    await addToHistory({
-      type: 'area',
-      filename: `area-capture-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5)}.png`,
-      timestamp: Date.now()
-    });
-    
-    showNotification('Area Captured!', 'Selected area saved successfully');
-    console.log('=== CAPTURE AND CROP AREA COMPLETED ===');
-    
-  } catch (error) {
-    console.error('=== CAPTURE AND CROP AREA FAILED ===');
-    console.error('Error:', error);
-    console.error('Error stack:', error.stack);
-    showNotification('Capture Failed', 'Could not capture area: ' + error.message);
-  }
-}
-
-// Keyboard shortcuts
-browserAPI.commands.onCommand.addListener((command) => {
-  if (command === 'capture-visible') {
-    captureVisibleArea();
+browser.runtime.onMessage.addListener((message, sender) => {
+  switch (message && message.action) {
+    case 'capture':
+      // Answer at once so the popup can close. The capture runs on here.
+      runCapture(message.mode, message.tabId);
+      return Promise.resolve({ ok: true });
+    case 'areaSelected':
+      if (sender.tab) captureArea(sender.tab, message.rect, message.scale);
+      return undefined;
+    case 'getCapture':
+      return getCapture(message.id, sender.tab);
+    case 'openRecorder':
+      return openRecorder();
+    case 'recordingState':
+      if (sender.tab) recorderTabId = sender.tab.id;
+      setRecordingBadge(message.state);
+      return undefined;
+    default:
+      return undefined;
   }
 });
 
-// Capture visible area
-async function captureVisibleArea() {
-  const dataUrl = await browserAPI.tabs.captureVisibleTab(null, { format: 'png' });
-  
-  const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
-  const filename = `screenshot-${timestamp}.png`;
-  
-  browserAPI.downloads.download({
-    url: dataUrl,
-    filename: filename,
-    saveAs: false
+browser.commands.onCommand.addListener((command) => {
+  const modes = { 'capture-visible': 'visible', 'capture-fullpage': 'fullpage', 'capture-area': 'area' };
+  if (modes[command]) runCapture(modes[command]);
+});
+
+browser.tabs.onRemoved.addListener((tabId) => {
+  for (const [id, entry] of captureStore) {
+    if (entry.editorTabId === tabId) captureStore.delete(id);
+  }
+  if (tabId === recorderTabId) {
+    recorderTabId = null;
+    setRecordingBadge('idle');
+  }
+});
+
+browser.notifications.onClicked.addListener((notificationId) => {
+  const downloadId = notificationDownloads.get(notificationId);
+  if (downloadId !== undefined) browser.downloads.show(downloadId).catch(() => {});
+});
+
+browser.notifications.onClosed.addListener((notificationId) => {
+  notificationDownloads.delete(notificationId);
+});
+
+async function getTargetTab(tabId) {
+  if (tabId !== undefined) return browser.tabs.get(tabId);
+  const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+  return tab;
+}
+
+function describeError(error, tab) {
+  if (tab && isRestrictedUrl(tab.url)) {
+    return 'Firefox does not let extensions capture this page. Try a normal web page.';
+  }
+  if (/permission|cannot access|scripted/i.test(error.message)) {
+    return 'Firefox does not let extensions access this page. Try a normal web page.';
+  }
+  return error.message || String(error);
+}
+
+async function runCapture(mode, tabId) {
+  let tab;
+  try {
+    tab = await getTargetTab(tabId);
+    if (mode === 'area') {
+      await browser.tabs.executeScript(tab.id, { file: '/overlay.js' });
+      return; // overlay.js sends "areaSelected" when the selection is done.
+    }
+    const settings = await getSettings();
+    let result;
+    if (mode === 'fullpage') {
+      result = await captureFullPage(tab, { loadLazyContent: settings.loadLazyContent });
+    } else {
+      result = await captureVisible(tab);
+    }
+    await deliver(result, tab, settings);
+  } catch (error) {
+    console.error('Capture failed:', error);
+    notify('Capture failed', describeError(error, tab));
+  }
+}
+
+async function captureArea(tab, rect, scale) {
+  try {
+    const result = await captureRect(tab, rect, scale);
+    await deliver(result, tab, await getSettings());
+  } catch (error) {
+    console.error('Area capture failed:', error);
+    notify('Capture failed', describeError(error, tab));
+  }
+}
+
+async function deliver({ blob, kind, reduced }, tab, settings) {
+  const name = `${kind}-${fileTimestamp()}`;
+  if (reduced) {
+    notify('Page is very large', 'The full-page image was scaled down to fit the browser canvas limit.');
+  }
+
+  if (settings.afterCapture === 'clipboard') {
+    await copyImageBlob(blob);
+    notify('Copied to clipboard', 'Paste the image where you need it.');
+    return;
+  }
+
+  if (settings.afterCapture === 'download') {
+    let output = blob;
+    if (settings.imageFormat === 'jpeg') {
+      output = await encodeCanvas(await blobToCanvas(blob), 'jpeg', settings.jpegQuality);
+    }
+    const filename = buildFilename(name, extensionForMimeType(output.type), settings.downloadFolder);
+    const downloadId = await downloadBlob(output, filename, settings.saveAs);
+    if (downloadId !== null) {
+      const notificationId = await notify('Screenshot saved', `${filename}\nClick to show the file.`);
+      if (notificationId) notificationDownloads.set(notificationId, downloadId);
+    }
+    return;
+  }
+
+  await openInEditor(blob, name, tab);
+}
+
+async function openInEditor(blob, name, tab) {
+  sweepCaptureStore();
+  const id = crypto.randomUUID();
+  captureStore.set(id, { blob, name, created: Date.now(), editorTabId: null });
+  const created = await browser.tabs.create({
+    url: `${EDITOR_URL}?capture=${id}`,
+    windowId: tab.windowId,
+    index: tab.index + 1,
+    openerTabId: tab.id
   });
+  const entry = captureStore.get(id);
+  if (entry) entry.editorTabId = created.id;
 }
 
-// Capture full page
-async function captureFullPage() {
-  try {
-    const tabs = await browserAPI.tabs.query({ active: true, currentWindow: true });
-    const tab = tabs[0];
-    
-    if (tab.url.startsWith('about:') || tab.url.startsWith('moz-extension://')) {
-      showNotification('Cannot Capture', 'Browser internal pages cannot be captured.');
-      return;
-    }
-    
-    showNotification('Capturing...', 'Please wait while capturing the full page');
-    
-    // Get page dimensions
-    const pageInfo = await browserAPI.tabs.executeScript(tab.id, {
-      code: `
-        ({
-          width: Math.max(
-            document.body.scrollWidth || 0,
-            document.documentElement.scrollWidth || 0,
-            document.body.offsetWidth || 0,
-            document.documentElement.offsetWidth || 0
-          ),
-          height: Math.max(
-            document.body.scrollHeight || 0,
-            document.documentElement.scrollHeight || 0,
-            document.body.offsetHeight || 0,
-            document.documentElement.offsetHeight || 0
-          ),
-          viewportHeight: window.innerHeight,
-          originalScrollY: window.scrollY,
-          dpr: window.devicePixelRatio || 1
-        })
-      `
-    });
-    
-    const { width, height, viewportHeight, originalScrollY, dpr } = pageInfo[0];
-    
-    // Check if page is too large
-    if (height > 30000) {
-      const dataUrl = await browserAPI.tabs.captureVisibleTab(null, { format: 'png' });
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
-      browserAPI.downloads.download({
-        url: dataUrl,
-        filename: `fullpage-${timestamp}.png`,
-        saveAs: true
-      });
-      
-      showNotification('Page Too Large', 'Captured visible area only');
-      return;
-    }
-    
-    const numCaptures = Math.ceil(height / viewportHeight);
-    const captures = [];
-    
-    // Capture sections with longer delays
-    for (let i = 0; i < numCaptures; i++) {
-      // Scroll to position
-      await browserAPI.tabs.executeScript(tab.id, {
-        code: `window.scrollTo(0, ${i * viewportHeight});`
-      });
-      
-      // Wait for page to settle
-      await new Promise(resolve => setTimeout(resolve, 1500));
-      
-      // Capture
-      const dataUrl = await browserAPI.tabs.captureVisibleTab(null, { format: 'png' });
-      captures.push(dataUrl);
-    }
-    
-    // Restore original scroll position
-    await browserAPI.tabs.executeScript(tab.id, {
-      code: `window.scrollTo(0, ${originalScrollY});`
-    });
-    
-    // Stitch images together in content script
-    await browserAPI.tabs.executeScript(tab.id, {
-      code: `
-        (function(captures, width, height, viewportHeight, dpr) {
-          return new Promise((resolve) => {
-            const canvas = document.createElement('canvas');
-            canvas.width = width;
-            canvas.height = height;
-            const ctx = canvas.getContext('2d');
-            
-            ctx.fillStyle = 'white';
-            ctx.fillRect(0, 0, width, height);
-            
-            let loadedCount = 0;
-            const totalCaptures = captures.length;
-            
-            captures.forEach((dataUrl, index) => {
-              const img = document.createElement('img');
-              img.onload = () => {
-                const y = index * viewportHeight;
-                ctx.drawImage(img, 0, y);
-                
-                loadedCount++;
-                
-                if (loadedCount === totalCaptures) {
-                  canvas.toBlob((blob) => {
-                    const url = URL.createObjectURL(blob);
-                    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = 'fullpage-' + timestamp + '.png';
-                    document.body.appendChild(a);
-                    a.click();
-                    document.body.removeChild(a);
-                    setTimeout(() => {
-                      URL.revokeObjectURL(url);
-                      resolve();
-                    }, 100);
-                  }, 'image/png');
-                }
-              };
-              img.onerror = () => {
-                console.error('Failed to load image segment');
-                loadedCount++;
-                if (loadedCount === totalCaptures) {
-                  resolve();
-                }
-              };
-              img.src = dataUrl;
-            });
-          });
-        })(${JSON.stringify(captures)}, ${width}, ${height}, ${viewportHeight}, ${dpr})
-      `
-    });
-    
-    await addToHistory({
-      type: 'fullpage',
-      filename: `fullpage-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5)}.png`,
-      timestamp: Date.now(),
-      url: tab.url
-    });
-    
-    showNotification('Full Page Captured!', 'Screenshot saved successfully');
-    
-  } catch (error) {
-    console.error('Full page capture error:', error);
-    showNotification('Capture Failed', error.message || 'Could not capture page');
+async function getCapture(id, senderTab) {
+  const entry = captureStore.get(id);
+  if (!entry) return null;
+  if (senderTab) entry.editorTabId = senderTab.id;
+  return { name: entry.name, dataUrl: await blobToDataUrl(entry.blob) };
+}
+
+// Drop captures whose editor tab never opened.
+function sweepCaptureStore() {
+  const now = Date.now();
+  for (const [id, entry] of captureStore) {
+    if (entry.editorTabId === null && now - entry.created > CAPTURE_TTL_MS) captureStore.delete(id);
   }
 }
 
-async function cropAndSaveImage(data) {
-  try {
-    const tabs = await browserAPI.tabs.query({ active: true, currentWindow: true });
-    const tab = tabs[0];
-    
-    await browserAPI.tabs.executeScript(tab.id, {
-      code: `
-        (function(dataUrl, selection) {
-          const img = document.createElement('img');
-          img.onload = () => {
-            const canvas = document.createElement('canvas');
-            const dpr = window.devicePixelRatio || 1;
-            
-            canvas.width = selection.width * dpr;
-            canvas.height = selection.height * dpr;
-            
-            const ctx = canvas.getContext('2d');
-            ctx.drawImage(
-              img,
-              selection.left * dpr, 
-              selection.top * dpr,
-              selection.width * dpr, 
-              selection.height * dpr,
-              0, 
-              0,
-              canvas.width, 
-              canvas.height
-            );
-            
-            canvas.toBlob((blob) => {
-              const url = URL.createObjectURL(blob);
-              const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
-              const a = document.createElement('a');
-              a.href = url;
-              a.download = 'area-capture-' + timestamp + '.png';
-              document.body.appendChild(a);
-              a.click();
-              document.body.removeChild(a);
-              setTimeout(() => URL.revokeObjectURL(url), 100);
-            });
-          };
-          img.src = dataUrl;
-        })(${JSON.stringify(data.image)}, ${JSON.stringify(data.selection)})
-      `
-    });
-    
-    await addToHistory({
-      type: 'area',
-      filename: `area-capture-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5)}.png`,
-      timestamp: Date.now()
-    });
-    
-    showNotification('Area Captured!', 'Selected area saved');
-    
-  } catch (error) {
-    console.error('Crop error:', error);
+async function openRecorder() {
+  const tabs = await browser.tabs.query({});
+  const existing = tabs.find((t) => t.url && t.url.startsWith(RECORDER_URL));
+  if (existing) {
+    await browser.tabs.update(existing.id, { active: true });
+    await browser.windows.update(existing.windowId, { focused: true });
+  } else {
+    await browser.tabs.create({ url: RECORDER_URL });
   }
+  return { ok: true };
 }
 
-function openEditor() {
-  browserAPI.tabs.create({ url: 'editor.html' });
+function setRecordingBadge(state) {
+  const badges = {
+    recording: { text: 'REC', color: '#d93025' },
+    paused: { text: '||', color: '#6b6b6b' },
+    idle: { text: '', color: '#6b6b6b' }
+  };
+  const badge = badges[state] || badges.idle;
+  browser.browserAction.setBadgeText({ text: badge.text });
+  browser.browserAction.setBadgeBackgroundColor({ color: badge.color });
 }
 
-async function addToHistory(capture) {
+async function notify(title, message) {
   try {
-    const result = await browserAPI.storage.local.get(['captureHistory']);
-    const history = result.captureHistory || [];
-    
-    history.unshift(capture);
-    
-    if (history.length > 100) {
-      history.pop();
-    }
-    
-    await browserAPI.storage.local.set({ captureHistory: history });
+    return await browser.notifications.create({
+      type: 'basic',
+      iconUrl: browser.runtime.getURL('icons/icon96.png'),
+      title,
+      message
+    });
   } catch (error) {
-    console.error('History error:', error);
+    console.warn(`${title}: ${message}`);
+    return null;
   }
 }
