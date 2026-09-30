@@ -4,55 +4,87 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Settings - Screen Recorder</title>
+  <link rel="stylesheet" href="tokens.css">
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
 
     body {
-      font: 14px/1.5 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      font: 14px/1.5 var(--sr-font-ui);
+      background: var(--sr-canvas);
       min-height: 100vh;
-      padding: 32px 16px;
-      color: #222;
+      padding: var(--sr-space-8) var(--sr-space-4);
+      color: var(--sr-text);
     }
 
     .container { max-width: 720px; margin: 0 auto; }
 
-    .header { display: flex; align-items: center; gap: 14px; color: #fff; margin-bottom: 20px; }
-    .header img { width: 48px; height: 48px; }
-    .header h1 { font-size: 24px; }
-    .header p { opacity: 0.9; }
+    .header { display: flex; align-items: center; gap: 14px; margin-bottom: var(--sr-space-6); }
+    .header img { width: 48px; height: 48px; flex: none; }
+    .header h1 { font-size: 26px; font-weight: 700; line-height: 1.25; }
+    .header p { color: var(--sr-text-muted); }
 
-    .card { background: #fff; border-radius: 14px; padding: 22px 24px; margin-bottom: 16px;
-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.15); }
-    .card h2 { font-size: 17px; margin-bottom: 14px; color: #4b3f9e; }
+    .card {
+      background: var(--sr-surface);
+      border: 1px solid var(--sr-border);
+      border-radius: var(--sr-radius-lg);
+      padding: 22px var(--sr-space-6);
+      margin-bottom: var(--sr-space-4);
+    }
+    .card h2 { font-size: 16px; font-weight: 700; margin-bottom: var(--sr-space-3); color: var(--sr-text); }
 
-    .row { display: grid; grid-template-columns: 200px 1fr; gap: 12px; align-items: center; padding: 8px 0; }
-    .row + .row { border-top: 1px solid #eee; }
+    :focus-visible { outline: 2px solid var(--sr-brand); outline-offset: 2px; }
+
+    .row { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: var(--sr-space-3); align-items: center; padding: var(--sr-space-3) 0; }
+    .row + .row { border-top: 1px solid var(--sr-border); }
     .row label { font-weight: 600; }
-    .row small { display: block; color: #666; font-weight: 400; }
+    .row small { display: block; color: var(--sr-text-muted); font-size: 13px; font-weight: 400; }
     .row select, .row input[type="text"] {
-      width: 100%; padding: 7px 9px; border: 1px solid #ccc; border-radius: 8px; font: inherit;
+      width: 100%; min-width: 0; min-height: 36px; padding: 6px 10px;
+      border: 1px solid var(--sr-border); border-radius: var(--sr-radius-sm);
+      font: inherit; color: var(--sr-text); background: var(--sr-input-bg);
+    }
+    .row input[type="text"]::placeholder { color: var(--sr-text-muted); opacity: 1; }
+    .row select:hover, .row input[type="text"]:hover { border-color: var(--sr-input-border-hover); }
+    .row select:focus-visible, .row input[type="text"]:focus-visible {
+      outline: 2px solid transparent; outline-offset: 0; border-color: var(--sr-brand); box-shadow: var(--sr-focus-ring);
     }
     .inline { display: flex; align-items: center; gap: 10px; }
+    input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--sr-brand); }
 
     .shortcuts { width: 100%; border-collapse: collapse; }
-    .shortcuts td { padding: 6px 0; border-bottom: 1px solid #eee; }
+    .shortcuts td { padding: var(--sr-space-2) 0; border-bottom: 1px solid var(--sr-border); }
     .shortcuts td:last-child { text-align: right; }
-    kbd { background: #f1f1f5; border: 1px solid #ccc; border-radius: 4px; padding: 1px 6px; font: 12px monospace; }
+    kbd {
+      background: var(--sr-surface-raised); border: 1px solid var(--sr-border); border-radius: 4px;
+      padding: 1px 6px; font: 12px var(--sr-font-mono); color: var(--sr-text);
+    }
 
-    .hint { color: #555; font-size: 13px; margin-top: 10px; }
+    .hint { color: var(--sr-text-muted); font-size: 13px; margin-top: 10px; }
+    .hint strong { color: var(--sr-text); }
 
-    .saved { position: fixed; bottom: 20px; right: 20px; background: #2e7d32; color: #fff;
-             padding: 8px 14px; border-radius: 8px; opacity: 0; transition: opacity 0.2s; }
+    .saved {
+      position: fixed; bottom: 20px; right: 20px; padding: var(--sr-space-2) 14px; border-radius: var(--sr-radius-sm);
+      background: color-mix(in srgb, var(--sr-success) 12%, var(--sr-surface));
+      border: 1px solid var(--sr-success-tint-border); color: var(--sr-success-text); font-weight: 600;
+      opacity: 0;
+    }
     .saved.show { opacity: 1; }
 
-    @media (max-width: 560px) { .row { grid-template-columns: 1fr; } }
+    @media (prefers-reduced-motion: no-preference) {
+      .saved { transition: opacity 0.2s; }
+      .row select, .row input[type="text"] { transition: border-color 140ms ease; }
+    }
+
+    @media (max-width: 560px) {
+      .row { grid-template-columns: minmax(0, 1fr); }
+      .card { padding: var(--sr-space-5); }
+    }
   </style>
 </head>
 <body>
   <div class="container">
     <div class="header">
-      <img src="icons/icon96.png" alt="">
+      <img src="icons/icon48.png" srcset="icons/icon48.png 1x, icons/icon96.png 2x" width="48" height="48" alt="">
       <div>
         <h1>Screen Recorder</h1>
         <p>Settings</p>

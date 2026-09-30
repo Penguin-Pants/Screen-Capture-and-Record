@@ -83,7 +83,7 @@ async function waitForRecorderPage(tabId) {
 
 function setRecordingBadge(state) {
   const badges = {
-    recording: { text: 'REC', color: '#d93025' },
+    recording: { text: 'REC', color: '#F04444' },
     paused: { text: '||', color: '#6b6b6b' },
     idle: { text: '', color: '#6b6b6b' }
   };

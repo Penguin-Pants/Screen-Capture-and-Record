@@ -91,6 +91,8 @@ src/            Extension source (load this folder in Firefox)
   common.js       Settings, presets, size estimates, file names, downloads
   recorder.*      Recorder page: record, review, camera bubble, export
   options.*       Settings page
+  tokens.css      Colors, spacing and type for the pages (Local Loop design tokens)
+  icons/          Extension icons and the Local Loop mark
   vendor/         Third-party code, unmodified (Mediabunny)
 scripts/        Maintenance scripts (npm run vendor)
 test/           Unit tests (Node) and page tests (Chromium)
