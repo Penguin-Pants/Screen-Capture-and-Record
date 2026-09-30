@@ -1,5 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Screen Recorder icon">
-  <rect x="4" y="4" width="120" height="120" rx="28" fill="#121418"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Screen Recorder mark">
   <g fill="none" stroke="#FFD34E" stroke-width="10" stroke-linecap="round" stroke-linejoin="round">
     <path d="M38 30H89C99 30 104 35 104 45V66"/>
     <path d="M68 98H38C28 98 24 92 24 82V46C24 36 30 30 38 30"/>
