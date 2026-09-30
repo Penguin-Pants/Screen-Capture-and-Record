@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const {
   sanitizeFolder, buildFilename, fileTimestamp, extensionForMimeType, RECORDING_PROFILES, EXPORT_PRESETS,
   SETTINGS_DEFAULTS, CAMERA_POSITIONS, getRecordingProfile, formatBytes, formatDuration, bytesPerMinute, fitWithin,
-  planExport, cameraBubbleRect
+  planExport, cameraBubbleRect, VOICE_AUDIO_BITS_PER_SECOND, COMPUTER_AUDIO_BITS_PER_SECOND
 } = require('../src/common.js');
 
 test('sanitizeFolder removes unsafe parts', () => {
@@ -71,6 +71,16 @@ test('planExport estimates the size from bitrate and length, with a margin', () 
 
   const tinyFromSlow = planExport(EXPORT_PRESETS.find((preset) => preset.id === 'tiny'), { ...source, frameRate: 10 });
   assert.equal(tinyFromSlow.frameRate, 10, 'never raises the frame rate');
+});
+
+test('planExport keeps the audio bitrate of the recording (a voice if not given)', () => {
+  const medium = EXPORT_PRESETS.find((preset) => preset.id === 'medium');
+  const source = { width: 1920, height: 1080, seconds: 60, bytes: 40e6, frameRate: 30, hasAudio: true };
+  assert.equal(planExport(medium, source).audioBitsPerSecond, VOICE_AUDIO_BITS_PER_SECOND);
+  const withComputerSound = planExport(medium, { ...source, audioBitsPerSecond: COMPUTER_AUDIO_BITS_PER_SECOND });
+  assert.equal(withComputerSound.audioBitsPerSecond, 128000);
+  assert.equal(withComputerSound.bytes, Math.round((((1000000 + 128000) * 60) / 8) * 1.1));
+  assert.equal(planExport(medium, { ...source, hasAudio: false, audioBitsPerSecond: 128000 }).audioBitsPerSecond, 0);
 });
 
 test('planExport marks presets that do not make the file smaller', () => {

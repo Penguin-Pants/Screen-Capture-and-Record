@@ -13,9 +13,14 @@ const openPage = useBrowser();
 // a green canvas for the webcam and an oscillator for the microphone. The
 // screen never shows pure green, so the camera bubble is easy to find in
 // saved frames. Every opened stream is kept in window.__opened, so tests can
-// check that all tracks stop.
+// check that all tracks stop. Sound input options: window.__audioInputs (the
+// devices; the first is the default), __micDelay (a late answer), __denyMic
+// (all devices), __denyDevices and __silentDevices (device IDs), and
+// __silentMic (all devices). Each device plays its own tone (__tones, 440 Hz
+// if not given), so tests can tell the devices apart in a recording.
 const fakeMedia = () => {
   window.__opened = [];
+  const audioInputs = () => window.__audioInputs || [{ kind: 'audioinput', deviceId: 'mic', label: 'Microphone' }];
   navigator.mediaDevices.getDisplayMedia = async (constraints) => {
     window.__displayConstraints = constraints;
     const { width, height } = window.__fakeScreen || { width: 320, height: 240 };
@@ -39,7 +44,7 @@ const fakeMedia = () => {
   navigator.mediaDevices.enumerateDevices = async () => [
     { kind: 'videoinput', deviceId: 'cam-front', label: 'Front camera' },
     { kind: 'videoinput', deviceId: 'cam-usb', label: 'USB camera' },
-    { kind: 'audioinput', deviceId: 'mic', label: 'Microphone' }
+    ...audioInputs()
   ];
   navigator.mediaDevices.getUserMedia = async (constraints) => {
     window.__userMedia = (window.__userMedia || []).concat([constraints]);
@@ -62,11 +67,29 @@ const fakeMedia = () => {
       window.__opened.push(stream);
       return stream;
     }
+    if (window.__micDelay) await new Promise((resolve) => setTimeout(resolve, window.__micDelay));
+    const wanted = constraints.audio && constraints.audio.deviceId && constraints.audio.deviceId.exact;
+    const device = wanted || audioInputs()[0].deviceId;
+    if (window.__denyMic || (window.__denyDevices || []).includes(device)) {
+      throw new DOMException('The request is not allowed by the user agent or the platform in the current context.', 'NotAllowedError');
+    }
+    if (!audioInputs().some((input) => input.deviceId === device)) {
+      throw new DOMException('Constraints could not be satisfied.', 'OverconstrainedError');
+    }
     const audio = new AudioContext();
     const oscillator = audio.createOscillator();
+    oscillator.frequency.value = (window.__tones || {})[device] || 440;
+    // A muted device gives zeros.
+    const gain = audio.createGain();
+    gain.gain.value = window.__silentMic || (window.__silentDevices || []).includes(device) ? 0 : 1;
     const destination = audio.createMediaStreamDestination();
-    oscillator.connect(destination);
+    oscillator.connect(gain).connect(destination);
     oscillator.start();
+    // Firefox tells the device and its name for a track.
+    const track = destination.stream.getAudioTracks()[0];
+    const settings = track.getSettings.bind(track);
+    track.getSettings = () => ({ ...settings(), deviceId: device });
+    Object.defineProperty(track, 'label', { value: audioInputs().find((input) => input.deviceId === device).label });
     window.__opened.push(destination.stream);
     return destination.stream;
   };
@@ -101,6 +124,74 @@ function probeDownload(page, index) {
     video.src = URL.createObjectURL(window.__downloadBlobs[i]);
   }), index);
 }
+
+// The sound of the recording ('recording') or of a saved file (its index),
+// as a player decodes it: the loudness (RMS) and the levels of the 440 Hz
+// and 1200 Hz tones (see fakeMedia). All 0 without a sound track.
+function soundOf(page, which) {
+  return page.evaluate(async (w) => {
+    const blob = w === 'recording' ? recording.blob : window.__downloadBlobs[w];
+    const mb = await loadMediabunny();
+    const input = new mb.Input({ formats: mb.ALL_FORMATS, source: new mb.BlobSource(blob) });
+    try {
+      const track = await input.getPrimaryAudioTrack();
+      if (!track) return { rms: 0, 440: 0, 1200: 0 };
+      const values = [];
+      let sampleRate = 48000;
+      for await (const sample of new mb.AudioSampleSink(track).samples()) {
+        const part = new Float32Array(sample.numberOfFrames);
+        sample.copyTo(part, { planeIndex: 0, format: 'f32-planar' });
+        values.push(...part);
+        sampleRate = sample.sampleRate;
+        sample.close();
+      }
+      const rms = values.length ? Math.sqrt(values.reduce((sum, value) => sum + value * value, 0) / values.length) : 0;
+      // Goertzel filter: the amplitude of one frequency, as a mean of blocks of 0.1 s.
+      const level = (frequency) => {
+        const block = Math.round(sampleRate / 10);
+        const k = 2 * Math.cos((2 * Math.PI * frequency) / sampleRate);
+        let total = 0;
+        let blocks = 0;
+        for (let start = 0; start + block <= values.length; start += block) {
+          let s1 = 0;
+          let s2 = 0;
+          for (let i = start; i < start + block; i++) {
+            const s0 = values[i] + k * s1 - s2;
+            s2 = s1;
+            s1 = s0;
+          }
+          total += Math.sqrt(Math.max(0, s1 * s1 + s2 * s2 - k * s1 * s2)) / (block / 2);
+          blocks++;
+        }
+        return blocks ? total / blocks : 0;
+      };
+      return { rms, 440: level(440), 1200: level(1200) };
+    } finally {
+      input.dispose();
+    }
+  }, which);
+}
+
+const soundLevel = async (page, which) => (await soundOf(page, which)).rms;
+
+// An audio encoder that takes the sound and gives nothing back. A similar
+// failure was reported for Firefox's Opus encoder.
+const silentAudioEncoder = () => {
+  const Real = AudioEncoder;
+  window.AudioEncoder = class {
+    static isConfigSupported(config) { return Real.isConfigSupported(config); }
+    constructor() { this.state = 'unconfigured'; this.encodeQueueSize = 0; }
+    configure() { this.state = 'configured'; }
+    encode(data) { data.close(); }
+    async flush() {}
+    reset() {}
+    close() { this.state = 'closed'; }
+    addEventListener() {}
+    removeEventListener() {}
+  };
+};
+
+const micRequests = (page) => page.evaluate(() => (window.__userMedia || []).filter((c) => c.audio));
 
 const liveTrackCount = (page) => page.evaluate(() =>
   window.__opened.flatMap((stream) => stream.getTracks()).filter((track) => track.readyState !== 'ended').length);
@@ -417,6 +508,553 @@ test('countdown can be cancelled by ending the share', { skip }, async () => {
   await page.waitForFunction(() => !document.getElementById('countdown').classList.contains('active'));
   assert.equal(await page.evaluate(() => window.__calls.downloads.length), 0);
   assert.equal(await liveTrackCount(page), 0);
+  await context.close();
+});
+
+test('microphone: opens when ticked, shows the level, and the same stream is recorded', { skip }, async () => {
+  const { page, context, errors } = await openRecorder();
+  assert.equal(await page.$('#audioCheck'), null, 'no tab audio option: Firefox gives no tab sound');
+  assert.equal(await page.isVisible('#micSetup'), false);
+  await page.check('#micCheck');
+  await page.waitForFunction(() => document.getElementById('micSetup').classList.contains('show'));
+  await page.waitForFunction(() => parseFloat(document.getElementById('micMeterFill').style.width) > 50);
+  assert.equal(await page.textContent('#micHint'), 'Talk to test the microphone. The bar moves when it hears you.');
+  assert.equal(await page.isVisible('#micDeviceRow'), false, 'one microphone: no list');
+  assert.deepEqual(await micRequests(page), [{ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }]);
+
+  await page.click('#startBtn');
+  await page.waitForFunction(() => document.getElementById('live').classList.contains('active'));
+  assert.equal(await page.evaluate(() => 'audio' in window.__displayConstraints), false, 'the screen request asks for video only');
+  assert.equal(await page.isVisible('#liveMicMeter'), true);
+  assert.equal(await page.isVisible('#liveComputerMeter'), false);
+  await page.waitForTimeout(1500);
+  await page.click('#stopBtn');
+  await page.waitForFunction(() => document.getElementById('result').classList.contains('active'));
+  assert.equal((await micRequests(page)).length, 1, 'Firefox asks for the microphone once');
+  assert.equal(await liveTrackCount(page), 0, 'the microphone stops with the recording');
+  assert.ok((await soundLevel(page, 'recording')) > 0.3, 'the recording has the microphone sound');
+  assert.equal(await page.isVisible('#message'), false, 'no sound warning');
+
+  // A new recording opens the microphone again.
+  await page.evaluate(() => { window.confirm = () => true; });
+  await page.click('#againBtn');
+  await page.waitForFunction(() => document.getElementById('micSetup').classList.contains('show'));
+  assert.equal((await micRequests(page)).length, 2);
+  assert.deepEqual(errors, []);
+  await context.close();
+});
+
+test('microphone: Start waits for the answer to an open microphone request', { skip }, async () => {
+  const { page, context, errors } = await openRecorder(() => { window.__micDelay = 800; });
+  await page.check('#micCheck');
+  await page.click('#startBtn');
+  await page.waitForFunction(() => document.getElementById('live').classList.contains('active'));
+  assert.equal((await micRequests(page)).length, 1, 'no second request, so Firefox asks once');
+  await page.waitForTimeout(1500);
+  await page.click('#stopBtn');
+  await page.waitForFunction(() => document.getElementById('result').classList.contains('active'));
+  assert.ok((await soundLevel(page, 'recording')) > 0.3, 'the recording has the microphone sound');
+  assert.deepEqual(errors, []);
+  await context.close();
+});
+
+test('microphone: a denied microphone unticks the option and says why', { skip }, async () => {
+  const { page, context } = await openRecorder(() => { window.__denyMic = true; });
+  // A click, not check(): the answer comes at once and unticks the option.
+  await page.click('#micCheck');
+  await page.waitForFunction(() => document.getElementById('message').classList.contains('show'));
+  assert.match(await page.textContent('#message'), /^Firefox did not allow the microphone\. .*remove the block, then reload this page\.$/);
+  assert.equal(await page.isChecked('#micCheck'), false);
+  assert.equal(await page.isVisible('#micSetup'), false);
+  assert.equal(await page.evaluate(() => window.__store['setting.microphone']), false);
+  assert.match(await page.textContent('#profileHint'), /^About 15 MB per minute/, 'the estimate has no sound');
+  await context.close();
+});
+
+test('microphone: when it fails after Start, the video records without sound only if you agree', { skip }, async () => {
+  const { page, context } = await openRecorder(() => { window.__micDelay = 600; window.__denyMic = true; });
+  const recordingStates = () => page.evaluate(() =>
+    window.__calls.messages.filter((m) => m.action === 'recordingState').length);
+
+  // Start before the answer comes. The answer is "blocked": cancel.
+  await page.check('#micCheck');
+  let question = '';
+  page.once('dialog', (dialog) => {
+    question = dialog.message();
+    dialog.dismiss();
+  });
+  await page.click('#startBtn');
+  await page.waitForFunction(() => !document.getElementById('startBtn').disabled &&
+    document.getElementById('message').classList.contains('show'));
+  assert.match(question, /^Firefox did not allow the microphone\.[\s\S]*\n\nRecord without the microphone\?$/);
+  assert.equal(await page.evaluate(() => document.getElementById('setup').style.display), '', 'back to the setup');
+  assert.equal(await recordingStates(), 0, 'nothing was recorded');
+  assert.equal(await liveTrackCount(page), 0, 'the screen is not shared any more');
+
+  // The same again, but agree: the video records without sound.
+  await page.check('#micCheck');
+  page.once('dialog', (dialog) => dialog.accept());
+  await page.click('#startBtn');
+  await page.waitForFunction(() => document.getElementById('live').classList.contains('active'));
+  assert.equal(await page.isVisible('#liveMicMeter'), false);
+  await page.waitForTimeout(1000);
+  await page.click('#stopBtn');
+  await page.waitForFunction(() => document.getElementById('result').classList.contains('active'));
+  assert.match(await page.textContent('#details'), / · no sound$/);
+  await context.close();
+});
+
+test('microphone: a silent microphone shows a hint, then a warning that "Save at once" keeps', { skip }, async () => {
+  const { page, context } = await openRecorder(() => { window.__silentMic = true; });
+  await page.check('#micCheck');
+  await page.waitForFunction(() => document.getElementById('micHint').classList.contains('warn'), null, { timeout: 8000 });
+  assert.match(await page.textContent('#micHint'), /^No sound from this microphone\. If the bar does not move when you talk/);
+
+  const warning = 'The microphone gave no sound during this recording. Before you record again, talk and look at the ' +
+    'level bar under "Include microphone".';
+  await record(page, 1200);
+  assert.equal(await page.textContent('#message'), warning);
+  assert.match(await page.textContent('#details'), / · no sound from the microphone$/);
+  // A save keeps the warning in view.
+  await page.check('#presets input[value="original"]');
+  await page.click('#saveBtn');
+  await page.waitForFunction(() => document.getElementById('saved').classList.contains('show'));
+  assert.equal(await page.textContent('#message'), warning);
+
+  await page.click('#againBtn');
+  await page.evaluate(() => saveSettings({ afterRecording: 'save' }));
+  await page.waitForFunction(() => microphone.stream);
+  await record(page, 1200);
+  await page.waitForFunction(() => window.__calls.downloads.length === 2 &&
+    document.getElementById('saved').classList.contains('show'));
+  assert.equal(await page.textContent('#message'),
+    `The recording was saved as it is. You can also save a smaller copy below. ${warning}`);
+  await context.close();
+});
+
+test('microphone: with 2 microphones, a list; the choice is used and saved', { skip }, async () => {
+  const inputs = () => {
+    window.__audioInputs = [
+      { kind: 'audioinput', deviceId: 'mic-built-in', label: 'Built-in microphone' },
+      { kind: 'audioinput', deviceId: 'mic-usb', label: 'USB microphone' }
+    ];
+  };
+  const { page, context, errors } = await openRecorder(inputs);
+  await page.check('#micCheck');
+  await page.waitForFunction(() => document.getElementById('micSetup').classList.contains('show'));
+  assert.equal(await page.isVisible('#micDeviceRow'), true);
+  assert.deepEqual(await page.$$eval('#micDevice option', (options) => options.map((option) => option.textContent)),
+    ['Built-in microphone', 'USB microphone']);
+  await page.selectOption('#micDevice', 'mic-usb');
+  await page.waitForFunction(() => window.__userMedia.filter((c) => c.audio).length === 2 && microphone.stream);
+  assert.deepEqual((await micRequests(page)).at(-1).audio.deviceId, { exact: 'mic-usb' });
+  assert.equal(await page.evaluate(() => window.__store['setting.microphoneDeviceId']), 'mic-usb');
+  assert.equal(await liveTrackCount(page), 1, 'the first microphone stopped');
+  assert.deepEqual(errors, []);
+  await context.close();
+
+  // The saved microphone is gone: the page opens the default microphone.
+  const second = await openRecorder([inputs, () => {
+    Object.assign(window.__store, { 'setting.microphone': true, 'setting.microphoneDeviceId': 'mic-gone' });
+  }]);
+  await second.page.waitForFunction(() => document.getElementById('micSetup').classList.contains('show'));
+  const requests = await micRequests(second.page);
+  assert.deepEqual(requests.map((c) => c.audio.deviceId), [{ exact: 'mic-gone' }, undefined]);
+  assert.equal(await second.page.isVisible('#message'), false);
+  await second.context.close();
+});
+
+test('microphone: a microphone that stops gives a warning', { skip }, async () => {
+  const { page, context } = await openRecorder();
+  await page.check('#micCheck');
+  await page.waitForFunction(() => microphone.stream);
+  const unplug = () => page.evaluate(() => microphone.stream.getAudioTracks()[0].dispatchEvent(new Event('ended')));
+
+  // Before recording: the page opens the microphone again.
+  await unplug();
+  assert.match(await page.textContent('#message'), /^The microphone stopped \(for example, it was unplugged\)\./);
+  await page.waitForFunction(() => window.__userMedia.filter((c) => c.audio).length === 2 && microphone.stream);
+
+  // While recording: the rest of the video has no sound from the microphone.
+  await page.click('#startBtn');
+  await page.waitForFunction(() => document.getElementById('live').classList.contains('active'));
+  await page.waitForTimeout(600);
+  await unplug();
+  assert.equal(await page.textContent('#message'), 'The microphone stopped. The rest of the video has no sound from the microphone.');
+  await page.waitForTimeout(400);
+  await page.click('#stopBtn');
+  await page.waitForFunction(() => document.getElementById('result').classList.contains('active'));
+  assert.equal(await page.textContent('#message'),
+    'The microphone stopped during this recording. Part of the video has no sound from the microphone.');
+  assert.match(await page.textContent('#details'), / · microphone stopped$/);
+  await context.close();
+});
+
+test('microphone: if it stops during the countdown, the recording uses the new microphone', { skip }, async () => {
+  // before: runs after the microphone is open, before it stops.
+  const countdownThenUnplug = async (page, before = async () => {}) => {
+    await page.check('#micCheck');
+    await page.waitForFunction(() => microphone.stream);
+    await page.selectOption('#countdownSelect', '3');
+    await page.click('#startBtn');
+    await page.waitForFunction(() => document.getElementById('countdown').classList.contains('active'));
+    await before();
+    await page.evaluate(() => microphone.stream.getAudioTracks()[0].dispatchEvent(new Event('ended')));
+  };
+  const { page, context, errors } = await openRecorder();
+  await countdownThenUnplug(page);
+  await page.waitForFunction(() => document.getElementById('live').classList.contains('active'), null, { timeout: 8000 });
+  assert.equal((await micRequests(page)).length, 2, 'the page opened the microphone again');
+  assert.equal(await page.evaluate(() => mediaRecorder.stream.getAudioTracks()[0] === microphone.stream.getAudioTracks()[0]), true,
+    'the recording uses the new microphone');
+  await page.waitForTimeout(1200);
+  await page.click('#stopBtn');
+  await page.waitForFunction(() => document.getElementById('result').classList.contains('active'));
+  assert.ok((await soundLevel(page, 'recording')) > 0.3, 'the recording has the sound of the new microphone');
+  assert.doesNotMatch(await page.textContent('#details'), /sound|microphone/);
+  assert.deepEqual(errors, []);
+  await context.close();
+
+  // The new microphone is blocked: the page asks before it records without sound.
+  const second = await openRecorder();
+  let question = '';
+  second.page.once('dialog', (dialog) => {
+    question = dialog.message();
+    dialog.dismiss();
+  });
+  await countdownThenUnplug(second.page, () => second.page.evaluate(() => { window.__denyMic = true; }));
+  await second.page.waitForFunction(() => !document.getElementById('startBtn').disabled &&
+    !document.getElementById('countdown').classList.contains('active'), null, { timeout: 8000 });
+  assert.match(question, /^Firefox did not allow the microphone\.[\s\S]*\n\nRecord without the microphone\?$/);
+  assert.equal(await second.page.evaluate(() => document.getElementById('setup').style.display), '', 'back to the setup');
+  assert.equal(await second.page.evaluate(() =>
+    window.__calls.messages.filter((m) => m.action === 'recordingState').length), 0, 'nothing was recorded');
+  assert.equal(await liveTrackCount(second.page), 0, 'the screen is not shared any more');
+  await second.context.close();
+});
+
+test('microphone: without a level meter, the microphone still records and no warning shows', { skip }, async () => {
+  const { page, context, errors } = await openRecorder(() => {
+    // Firefox can refuse the meter, for example when two sample rates differ.
+    AudioContext.prototype.createMediaStreamSource = () => {
+      throw new DOMException('Connecting AudioNodes from AudioContexts with different sample-rate is currently not supported.', 'NotSupportedError');
+    };
+  });
+  await page.check('#micCheck');
+  await page.waitForFunction(() => document.getElementById('micSetup').classList.contains('show'));
+  assert.equal(await page.textContent('#micHint'), 'The level meter is not available. The microphone records.');
+  assert.equal(await page.isVisible('#micSetup .meter'), false);
+  await record(page, 1500);
+  assert.ok((await soundLevel(page, 'recording')) > 0.3, 'the recording has the microphone sound');
+  assert.equal(await page.isVisible('#message'), false, 'without level values, the sound is not judged');
+  assert.doesNotMatch(await page.textContent('#details'), /sound|microphone/);
+  assert.deepEqual(errors, []);
+  await context.close();
+});
+
+// A microphone (440 Hz) and a loopback device (1200 Hz).
+const withLoopback = () => {
+  window.__audioInputs = [
+    { kind: 'audioinput', deviceId: 'mic', label: 'Microphone (USB)' },
+    { kind: 'audioinput', deviceId: 'stereo-mix', label: 'Stereo Mix (Realtek Audio)' }
+  ];
+  window.__tones = { mic: 440, 'stereo-mix': 1200 };
+};
+
+test('computer sound: opens the loopback device without voice filters, with a meter and a device list', { skip }, async () => {
+  const { page, context, errors } = await openRecorder(withLoopback);
+  assert.equal(await page.isVisible('#computerSetup'), false);
+  await page.check('#computerCheck');
+  await page.waitForFunction(() => document.getElementById('computerSetup').classList.contains('show'));
+  await page.waitForFunction(() => parseFloat(document.getElementById('computerMeterFill').style.width) > 50);
+  assert.deepEqual(await micRequests(page), [{
+    audio: {
+      echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: { ideal: 2 },
+      deviceId: { exact: 'stereo-mix' }
+    }
+  }], 'the first loopback device, found by its name');
+  assert.equal(await page.textContent('#computerHint'), 'Play a sound on the computer. The bar moves when the device hears it.');
+  assert.deepEqual(await page.$$eval('#computerDevice option', (options) => options.map((option) => option.textContent)),
+    ['Microphone (USB)', 'Stereo Mix (Realtek Audio)']);
+  assert.equal(await page.inputValue('#computerDevice'), 'stereo-mix');
+  assert.match(await page.textContent('#profileHint'), /^About 16 MB per minute/, 'the computer sound gets 128 kbit/s');
+  assert.equal(await page.evaluate(() => window.__store['setting.computerSound']), true);
+  assert.deepEqual(errors, []);
+  await context.close();
+});
+
+test('computer sound: with the microphone, the recording and a copy have both', { skip }, async () => {
+  const { page, context, errors } = await openRecorder(withLoopback);
+  await page.check('#micCheck');
+  await page.check('#computerCheck');
+  await page.waitForFunction(() => microphone.stream && computerSound.stream);
+  await page.click('#startBtn');
+  await page.waitForFunction(() => document.getElementById('live').classList.contains('active'));
+  assert.deepEqual(await page.evaluate(() => {
+    const tracks = mediaRecorder.stream.getAudioTracks();
+    return {
+      count: tracks.length,
+      mixed: tracks[0] !== microphone.stream.getAudioTracks()[0] && tracks[0] !== computerSound.stream.getAudioTracks()[0],
+      bits: mediaRecorder.audioBitsPerSecond
+    };
+  }), { count: 1, mixed: true, bits: 128000 });
+  assert.equal(await page.isVisible('#liveMicMeter'), true);
+  assert.equal(await page.isVisible('#liveComputerMeter'), true);
+  await page.waitForTimeout(2000);
+  await page.click('#stopBtn');
+  await page.waitForFunction(() => document.getElementById('result').classList.contains('active') &&
+    !document.getElementById('exportNote').textContent.startsWith('Checking'));
+  const recorded = await soundOf(page, 'recording');
+  assert.ok(recorded[440] > 0.2 && recorded[1200] > 0.2, `both inputs are in the recording: ${JSON.stringify(recorded)}`);
+  assert.equal(await liveTrackCount(page), 0, 'both inputs stop with the recording');
+  assert.equal(await page.evaluate(() => mixer), null, 'the mixer is closed');
+
+  await page.check('#presets input[value="tiny"]');
+  await page.click('#saveBtn');
+  await page.waitForFunction(() => document.getElementById('saved').classList.contains('show'), null, { timeout: 60000 });
+  const copy = await soundOf(page, 0);
+  assert.ok(copy[440] > 0.2 && copy[1200] > 0.2, `both inputs are in the copy: ${JSON.stringify(copy)}`);
+  assert.deepEqual(errors, []);
+  await context.close();
+});
+
+test('computer sound: alone, the recording has the computer sound, with no mixer', { skip }, async () => {
+  const { page, context, errors } = await openRecorder(withLoopback);
+  await page.check('#computerCheck');
+  await page.waitForFunction(() => computerSound.stream);
+  await page.click('#startBtn');
+  await page.waitForFunction(() => document.getElementById('live').classList.contains('active'));
+  assert.equal(await page.evaluate(() =>
+    mediaRecorder.stream.getAudioTracks()[0] === computerSound.stream.getAudioTracks()[0] && mixer === null), true);
+  assert.equal(await page.isVisible('#liveMicMeter'), false);
+  await page.waitForTimeout(1500);
+  await page.click('#stopBtn');
+  await page.waitForFunction(() => document.getElementById('result').classList.contains('active'));
+  const recorded = await soundOf(page, 'recording');
+  assert.ok(recorded[1200] > 0.3 && recorded[440] < 0.05, JSON.stringify(recorded));
+  assert.deepEqual(errors, []);
+  await context.close();
+});
+
+test('computer sound: without a loopback device, the hint says that the device is the microphone', { skip }, async () => {
+  const { page, context } = await openRecorder();
+  await page.check('#micCheck');
+  await page.waitForFunction(() => microphone.stream);
+  await page.check('#computerCheck');
+  await page.waitForFunction(() => document.getElementById('computerSetup').classList.contains('show'));
+  assert.equal((await micRequests(page)).at(-1).audio.deviceId, undefined, 'no loopback device: Firefox lets you choose');
+  await page.waitForFunction(() => document.getElementById('computerHint').classList.contains('warn'));
+  assert.equal(await page.textContent('#computerHint'),
+    'This is the device of your microphone. Choose your loopback device (for example, Stereo Mix) in the list.');
+  assert.equal(await page.isVisible('#computerDeviceRow'), true, 'the list shows with one device too');
+  await context.close();
+});
+
+test('computer sound: when the saved device is gone, another loopback device opens, not the microphone', { skip }, async () => {
+  const { page, context, errors } = await openRecorder(() => {
+    window.__audioInputs = [
+      { kind: 'audioinput', deviceId: 'mic', label: 'Microphone (USB)' },
+      { kind: 'audioinput', deviceId: 'cable', label: 'CABLE Output (VB-Audio Virtual Cable)' }
+    ];
+    window.__tones = { mic: 440, cable: 1200 };
+    Object.assign(window.__store, { 'setting.computerSound': true, 'setting.computerSoundDeviceId': 'stereo-mix-gone' });
+  });
+  await page.waitForFunction(() => computerSound.stream);
+  assert.deepEqual((await micRequests(page)).map((c) => c.audio.deviceId), [{ exact: 'stereo-mix-gone' }, { exact: 'cable' }]);
+  assert.equal(await page.textContent('#computerHint'), 'Play a sound on the computer. The bar moves when the device hears it.');
+  assert.deepEqual(errors, []);
+  await context.close();
+});
+
+test('computer sound: a device that is not a loopback device gives a warning, also without the microphone', { skip }, async () => {
+  const { page, context } = await openRecorder();
+  await page.check('#computerCheck');
+  await page.waitForFunction(() => document.getElementById('computerHint').classList.contains('warn'), null, { timeout: 5000 });
+  assert.equal(await page.textContent('#computerHint'), 'This device does not look like a loopback device. If it is a ' +
+    'microphone, choose your loopback device (for example, Stereo Mix) in the list.');
+  await context.close();
+});
+
+test('computer sound: a denied device unticks the option; after Start, you choose', { skip }, async () => {
+  const { page, context } = await openRecorder([withLoopback, () => { window.__denyDevices = ['stereo-mix']; }]);
+  // A click, not check(): the answer comes at once and unticks the option.
+  await page.click('#computerCheck');
+  await page.waitForFunction(() => document.getElementById('message').classList.contains('show'));
+  assert.match(await page.textContent('#message'), /^Firefox did not allow the sound device\. To record the computer sound, /);
+  assert.equal(await page.isChecked('#computerCheck'), false);
+  assert.equal(await page.evaluate(() => window.__store['setting.computerSound']), false);
+  await context.close();
+
+  // The answer comes after Start: agree to record with the microphone only.
+  const second = await openRecorder([withLoopback, () => { window.__denyDevices = ['stereo-mix']; window.__micDelay = 600; }]);
+  await second.page.check('#micCheck');
+  await second.page.check('#computerCheck');
+  let question = '';
+  second.page.once('dialog', (dialog) => {
+    question = dialog.message();
+    dialog.accept();
+  });
+  await second.page.click('#startBtn');
+  await second.page.waitForFunction(() => document.getElementById('live').classList.contains('active'), null, { timeout: 8000 });
+  assert.match(question, /^Firefox did not allow the sound device\.[\s\S]*\n\nRecord without the computer sound\?$/);
+  await second.page.waitForTimeout(1200);
+  await second.page.click('#stopBtn');
+  await second.page.waitForFunction(() => document.getElementById('result').classList.contains('active'));
+  const recorded = await soundOf(second.page, 'recording');
+  assert.ok(recorded[440] > 0.3 && recorded[1200] < 0.05, JSON.stringify(recorded));
+  await second.context.close();
+});
+
+test('computer sound: when the mix fails, you choose the microphone only or no recording', { skip }, async () => {
+  const { page, context } = await openRecorder([withLoopback, () => {
+    // Firefox can refuse a stream, for example when two sample rates differ.
+    AudioContext.prototype.createMediaStreamSource = () => {
+      throw new DOMException('Connecting AudioNodes from AudioContexts with different sample-rate is currently not supported.', 'NotSupportedError');
+    };
+  }]);
+  const recordingStates = () => page.evaluate(() =>
+    window.__calls.messages.filter((m) => m.action === 'recordingState').length);
+  await page.check('#micCheck');
+  await page.check('#computerCheck');
+  await page.waitForFunction(() => microphone.stream && computerSound.stream);
+
+  let question = '';
+  page.once('dialog', (dialog) => {
+    question = dialog.message();
+    dialog.dismiss();
+  });
+  await page.click('#startBtn');
+  await page.waitForFunction(() => !document.getElementById('startBtn').disabled);
+  assert.match(question, /^Firefox cannot mix the computer sound with the microphone \([^)]*\)\.\n\nRecord with the microphone only\?$/);
+  assert.equal(await recordingStates(), 0, 'nothing was recorded');
+  assert.equal(await liveTrackCount(page), 2, 'the screen is not shared; both inputs stay open for the next try');
+
+  page.once('dialog', (dialog) => dialog.accept());
+  await page.click('#startBtn');
+  await page.waitForFunction(() => document.getElementById('live').classList.contains('active'));
+  assert.equal(await page.evaluate(() => mediaRecorder.stream.getAudioTracks()[0] === microphone.stream.getAudioTracks()[0]), true);
+  await page.waitForTimeout(1200);
+  await page.click('#stopBtn');
+  await page.waitForFunction(() => document.getElementById('result').classList.contains('active'));
+  const recorded = await soundOf(page, 'recording');
+  assert.ok(recorded[440] > 0.3 && recorded[1200] < 0.05, JSON.stringify(recorded));
+  await context.close();
+});
+
+test('computer sound: a silent device gives a hint, then a warning after the recording', { skip }, async () => {
+  const { page, context } = await openRecorder([withLoopback, () => { window.__silentDevices = ['stereo-mix']; }]);
+  await page.check('#micCheck');
+  await page.check('#computerCheck');
+  await page.waitForFunction(() => document.getElementById('computerHint').classList.contains('warn'), null, { timeout: 8000 });
+  assert.match(await page.textContent('#computerHint'), /^No sound from this device\. Play a sound on the computer\./);
+  await record(page, 1200);
+  assert.equal(await page.textContent('#message'),
+    'No computer sound was recorded. If the computer played sound, check the device under "Include computer sound".');
+  assert.match(await page.textContent('#details'), / · no computer sound$/);
+  await context.close();
+});
+
+test('a smaller copy keeps the recorded sound, also when the audio encoder gives nothing', { skip }, async () => {
+  const { page, context, errors } = await openRecorder(silentAudioEncoder);
+  await page.check('#micCheck');
+  await record(page, 2000);
+  await page.check('#presets input[value="tiny"]');
+  await page.click('#saveBtn');
+  await page.waitForFunction(() => document.getElementById('saved').classList.contains('show'), null, { timeout: 60000 });
+  assert.match(await page.evaluate(() => window.__calls.downloads[0].filename), /-240p\.webm$/);
+  assert.ok((await soundLevel(page, 0)) > 0.3, 'the copy has the microphone sound');
+  assert.deepEqual(errors, []);
+  await context.close();
+});
+
+test('a file that would lose the sound is not saved', { skip }, async () => {
+  const { page, context } = await openRecorder(silentAudioEncoder);
+  await page.check('#micCheck');
+  await record(page, 1500);
+
+  // A new encode of the sound gives no packets: the check after the conversion stops it.
+  const encodeError = await page.evaluate(() => convertRecording({ audio: { codec: 'opus', forceTranscode: true } }, 'webm')
+    .then(() => '', (error) => error.message)
+    .finally(() => { conversion = null; }));
+  assert.equal(encodeError, 'The sound did not go into the file.');
+
+  // The sound cannot go into the chosen format: Save stops, and nothing is saved.
+  await page.evaluate(() => exportSupport.formats.forEach((format) => { format.audioCodec = 'aac'; }));
+  await page.check('#presets input[value="tiny"]');
+  await page.click('#saveBtn');
+  await page.waitForFunction(() => !document.getElementById('saveBtn').disabled &&
+    document.getElementById('message').classList.contains('show'), null, { timeout: 60000 });
+  assert.equal(await page.textContent('#message'),
+    'Could not save the video: This browser cannot put the sound in this file (no_encodable_target_codec).');
+  assert.equal(await page.evaluate(() => window.__calls.downloads.length), 0);
+  await context.close();
+});
+
+test('an MP4 copy with Opus sound shows a note about players', { skip }, async () => {
+  // A browser that encodes H.264 video but no AAC sound, like Firefox.
+  const { page, context } = await openRecorder(() => {
+    const video = VideoEncoder.isConfigSupported.bind(VideoEncoder);
+    VideoEncoder.isConfigSupported = async (config) =>
+      (config.codec.startsWith('avc') ? { supported: true, config } : video(config));
+    const audio = AudioEncoder.isConfigSupported.bind(AudioEncoder);
+    AudioEncoder.isConfigSupported = async (config) =>
+      (config.codec.startsWith('mp4a') ? { supported: false, config } : audio(config));
+  });
+  await page.check('#micCheck');
+  await record(page, 1500);
+  await page.check('#presets input[value="tiny"]');
+  assert.deepEqual(await page.$$eval('#formatSelect option', (options) => options.map((option) => option.textContent)),
+    ['WebM (small files, plays in browsers)', 'MP4 (H.264 video, Opus sound)']);
+  await page.selectOption('#formatSelect', 'webm');
+  assert.equal(await page.isVisible('#formatNote'), false);
+  await page.selectOption('#formatSelect', 'mp4');
+  assert.match(await page.textContent('#formatNote'),
+    /^Some players \(for example, Windows Media Player\) cannot play Opus sound in an MP4 file\. They play the video with no sound\./);
+  await page.check('#presets input[value="original"]');
+  assert.equal(await page.isVisible('#formatNote'), false, '"As recorded" keeps WebM');
+  await context.close();
+});
+
+test('ending the share during the countdown keeps the camera and the microphone open', { skip }, async () => {
+  const { page, context } = await openRecorder(() => { window.__store['setting.camera'] = true; });
+  await page.check('#micCheck');
+  await page.waitForFunction(() => microphone.stream && cameraStream);
+  await page.selectOption('#countdownSelect', '3');
+  await page.click('#startBtn');
+  await page.waitForFunction(() => document.getElementById('countdown').classList.contains('active'));
+  // You end the share from the Firefox sharing indicator.
+  await page.evaluate(() => sourceStreams[0].getVideoTracks()[0].dispatchEvent(new Event('ended')));
+  await page.waitForFunction(() => !document.getElementById('countdown').classList.contains('active') &&
+    !document.getElementById('startBtn').disabled);
+  assert.equal(await page.evaluate(() => document.getElementById('setup').style.display), '', 'back to the setup');
+  assert.equal(await page.isVisible('#micSetup'), true, 'the level meter still shows');
+  assert.equal(await page.isVisible('#cameraSetup'), true, 'the camera preview still shows');
+  assert.equal((await micRequests(page)).length, 1, 'no new microphone request');
+  assert.equal(await liveTrackCount(page), 2, 'the screen stopped; the camera and the microphone stay open');
+  await context.close();
+});
+
+test('a recording with no sound data says so, and "As recorded" saves it with the warning', { skip }, async () => {
+  const { page, context, errors } = await openRecorder(() => {
+    // The browser records no sound data, for example when an input ends at once.
+    const Real = MediaRecorder;
+    window.MediaRecorder = class extends Real {
+      constructor(stream, options) {
+        super(new MediaStream(stream.getVideoTracks()), { ...options, mimeType: 'video/webm;codecs=vp9' });
+      }
+    };
+  });
+  await page.check('#micCheck');
+  await record(page, 1500);
+  const warning = 'The recording has no sound: the browser recorded no sound data. Before you record again, look at the level bars.';
+  assert.equal(await page.textContent('#message'), warning);
+  assert.match(await page.textContent('#details'), / · no sound$/);
+  await page.check('#presets input[value="original"]');
+  await page.click('#saveBtn');
+  await page.waitForFunction(() => document.getElementById('saved').classList.contains('show'));
+  assert.equal(await page.textContent('#message'), warning, 'the warning stays in view');
+  assert.equal(await soundLevel(page, 0), 0);
+  assert.deepEqual(errors, []);
   await context.close();
 });
 

@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Screen Recorder",
-  "version": "2.0.0",
+  "version": "2.2.0",
   "description": "Record your screen with your webcam and microphone, and save small videos that are easy to share. Everything stays on your device.",
   "icons": {
     "16": "icons/icon16.png",
